@@ -4,10 +4,10 @@ DataHub on Minikube via Helm + Makefile
 
 Quickstart
 
-- Start cluster: `make mk:up`
-- Install DataHub: `make datahub:install`
-- Check health: `make datahub:status`
-- Port-forward (optional): `make datahub:portfw` then open UI at `http://localhost:9002` and GraphiQL at `http://localhost:8080/api/graphiql`
+- Start cluster: `make mk-up` (alias: `make mk:up`)
+- Install DataHub: `make datahub-install` (alias: `make datahub:install`)
+- Check health: `make datahub-status` (alias: `make datahub:status`)
+- Port-forward (optional): `make datahub-portfw` (alias: `make datahub:portfw`) then open UI at `http://localhost:9002` and GraphiQL at `http://localhost:8080/api/graphiql`
 
 Docs
 
@@ -26,4 +26,3 @@ Notes
 - Helm repo: `acryldata` (`https://helm.acryldata.io`)
 - Make targets use `helm upgrade --install` with the values files
 - Tests require Python and the DataHub SDK; install via `make datahub:test:integration` or `make datahub:test:e2e`
-

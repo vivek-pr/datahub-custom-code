@@ -12,27 +12,27 @@ Quick Start
 
 1) Start Minikube
 
-- `make mk:up`
+- `make mk-up` (alias: `make mk:up`)
 
 2) Install DataHub (and prerequisites)
 
-- `make datahub:install`
+- `make datahub-install` (alias: `make datahub:install`)
 
 3) Check status and health
 
-- `make datahub:status`
+- `make datahub-status` (alias: `make datahub:status`)
 
 4) Optionally port-forward for local access
 
-- `make datahub:portfw`
+- `make datahub-portfw` (alias: `make datahub:portfw`)
 - UI: `http://localhost:9002`
 - GraphiQL: `http://localhost:8080/api/graphiql`
 
 5) Run integration / smoke tests (optional)
 
 - Create venv and install SDKs automatically and run checks:
-  - Integration (GraphQL + REST emitter tag): `make datahub:test:integration`
-  - E2E smoke (ingest sample dataset): `make datahub:test:e2e`
+  - Integration (GraphQL + REST emitter tag): `make datahub-test-integration` (alias: `make datahub:test:integration`)
+  - E2E smoke (ingest sample dataset): `make datahub-test-e2e` (alias: `make datahub:test:e2e`)
 
 Helm Configuration
 
@@ -77,4 +77,3 @@ Cleanup
 
 - `make datahub:uninstall`
 - PVs may remain (ES/MySQL). To fully clean: `kubectl -n datahub delete pvc --all` and delete lingering PVs if desired.
-
