@@ -38,6 +38,7 @@ Helm Configuration
 
 - DataHub values: `infra/helm/datahub-values.yaml` (ClusterIP services, reduced resources)
 - Prerequisites values: `infra/helm/prerequisites-values.yaml` (Single-node Kafka & Elasticsearch)
+- If the Helm repo is unreachable, the Makefile falls back to cloning `acryldata/datahub-helm` locally and installing from `charts/`. Requires `git`. You can pin the ref via `HELM_CHART_REF`.
 
 Make Targets
 
@@ -58,6 +59,7 @@ Health Checks
 Troubleshooting
 
 - Helm repo add fails or DNS resolution issues
+  - The Makefile should fall back automatically to local charts; ensure `git` is installed.
   - Retry `helm repo add acryldata https://helm.acryldata.io && helm repo update`
   - Check network/VPN and that `curl https://helm.acryldata.io/index.yaml` resolves
 

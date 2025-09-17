@@ -3,7 +3,8 @@
 datahub-gms:
   enabled: true
   service:
-    type: ClusterIP
+    type: NodePort
+    nodePort: 30081
   resources:
     requests:
       cpu: 100m
@@ -23,7 +24,8 @@ datahub-frontend:
   enabled: true
   replicaCount: 1
   service:
-    type: ClusterIP
+    type: NodePort
+    nodePort: 30082
   hpa:
     enabled: false
   resources:
@@ -98,6 +100,10 @@ global:
     enabled: true
     defaultCliVersion: "1.0.0"
 
+  # Disable auth for local dev to simplify emitters/tests
+  metadata_service_authentication:
+    enabled: false
+
   # Ensure DataHub services talk to in-cluster ES
   elasticsearch:
     host: elasticsearch-master
@@ -105,4 +111,3 @@ global:
     useSSL: "false"
     skipcheck: "false"
     insecure: "false"
-

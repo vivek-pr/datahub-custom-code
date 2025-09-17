@@ -1,0 +1,58 @@
+# Node.js dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Logs
+logs/
+*.log
+*.tlog
+*.out
+*.err
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# IDE specific files
+.vscode/
+.idea/
+*.iml
+
+# Build artifacts
+dist/
+build/
+out/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+.venv/*
+.venv/
+.venv
+
+# Temporary files
+*.tmp
+*.swp
+*.bak
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage reports
+coverage/
+
+# Dependency directories
+.bower_components/
+jspm_packages/
+
+# Miscellaneous
+*.lock
+*.gz
+*.zip
+*.tar
+*.tgz
+*.7z
+*.rar

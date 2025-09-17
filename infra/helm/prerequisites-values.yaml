@@ -19,9 +19,7 @@ opensearch:
   enabled: false
 
 mysql:
-  enabled: true
-  primary:
-    extraFlags: "--character-set-server=utf8mb4 --collation-server=utf8mb4_bin"
+  enabled: false
 
 postgresql:
   enabled: false

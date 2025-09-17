@@ -1,0 +1,79 @@
+rules:
+  - name: pii_email
+    description: Email address detected via column name or value regex.
+    tag: urn:li:tag:pii-email
+    name_patterns:
+      - email
+      - e_mail
+    value_pattern: (?i)^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$
+    name_weight: 0.45
+    value_weight: 0.55
+    value_match_ratio: 0.5
+    min_confidence: 0.6
+
+  - name: pii_phone
+    description: Phone number (Indian formats, lenient on separators).
+    tag: urn:li:tag:pii-phone
+    name_patterns:
+      - phone
+      - mobile
+      - msisdn
+      - contact
+    value_pattern: (?i)^(?:\+?91[\s-]?)?(?:\d[\s-]?){10}$
+    name_weight: 0.4
+    value_weight: 0.6
+    value_match_ratio: 0.5
+    min_confidence: 0.6
+
+  - name: pii_pan
+    description: Indian Permanent Account Number.
+    tag: urn:li:tag:pii-pan
+    name_patterns:
+      - pan
+      - permanent_account
+    value_pattern: ^[A-Z]{5}\d{4}[A-Z]$
+    name_weight: 0.4
+    value_weight: 0.6
+    value_match_ratio: 0.5
+    min_confidence: 0.6
+
+  - name: pii_aadhaar
+    description: Aadhaar identifier (12 digit numeric).
+    tag: urn:li:tag:pii-aadhaar
+    name_patterns:
+      - aadhaar
+      - aadhar
+    value_pattern: ^\d{12}$
+    name_weight: 0.4
+    value_weight: 0.6
+    value_match_ratio: 0.7
+    min_confidence: 0.6
+
+  - name: pii_name
+    description: General person name indicator.
+    tag: urn:li:tag:pii-name
+    name_patterns:
+      - name
+      - full_name
+      - first_name
+      - last_name
+      - fname
+      - lname
+    name_weight: 0.7
+    value_weight: 0.3
+    value_match_ratio: 0.6
+    min_confidence: 0.6
+
+  - name: pii_card
+    description: Card identifier (credit/debit).
+    tag: urn:li:tag:pii-card
+    name_patterns:
+      - card
+      - cc
+      - creditcard
+      - debitcard
+    value_pattern: ^(?:\d[\s-]?){12,19}$
+    name_weight: 0.5
+    value_weight: 0.5
+    value_match_ratio: 0.6
+    min_confidence: 0.7
