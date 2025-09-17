@@ -1,0 +1,108 @@
+# Lightweight DataHub overrides for Minikube
+
+datahub-gms:
+  enabled: true
+  service:
+    type: ClusterIP
+  resources:
+    requests:
+      cpu: 100m
+      memory: 768Mi
+    limits:
+      memory: 1024Mi
+  livenessProbe:
+    initialDelaySeconds: 60
+    periodSeconds: 30
+    failureThreshold: 8
+  readinessProbe:
+    initialDelaySeconds: 120
+    periodSeconds: 30
+    failureThreshold: 8
+
+datahub-frontend:
+  enabled: true
+  replicaCount: 1
+  service:
+    type: ClusterIP
+  hpa:
+    enabled: false
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi
+    limits:
+      memory: 768Mi
+
+acryl-datahub-actions:
+  enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+datahub-mae-consumer:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 192Mi
+    limits:
+      memory: 512Mi
+
+datahub-mce-consumer:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 192Mi
+    limits:
+      memory: 512Mi
+
+elasticsearchSetupJob:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+kafkaSetupJob:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      memory: 768Mi
+
+mysqlSetupJob:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+datahubUpgrade:
+  batchSize: 500
+  batchDelayMs: 200
+
+global:
+  strict_mode: true
+  datahub_analytics_enabled: false
+  datahub_standalone_consumers_enabled: false
+  graph_service_impl: elasticsearch
+  imageRegistry: docker.io
+
+  # Managed ingestion CLI (kept enabled; low overhead)
+  managed_ingestion:
+    enabled: true
+    defaultCliVersion: "1.0.0"
+
+  # Ensure DataHub services talk to in-cluster ES
+  elasticsearch:
+    host: elasticsearch-master
+    port: "9200"
+    useSSL: "false"
+    skipcheck: "false"
+    insecure: "false"
+

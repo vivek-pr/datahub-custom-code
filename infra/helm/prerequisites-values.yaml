@@ -1,0 +1,50 @@
+# Single-node Kafka & Elasticsearch suitable for Minikube
+
+elasticsearch:
+  enabled: true
+  replicas: 1
+  minimumMasterNodes: 1
+  antiAffinity: "soft"
+  clusterHealthCheckParams: "wait_for_status=yellow&timeout=1s"
+  esJavaOpts: "-Xmx512m -Xms512m"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 1024Mi
+    limits:
+      cpu: 1000m
+      memory: 1024Mi
+
+opensearch:
+  enabled: false
+
+mysql:
+  enabled: true
+  primary:
+    extraFlags: "--character-set-server=utf8mb4 --collation-server=utf8mb4_bin"
+
+postgresql:
+  enabled: false
+
+kafka:
+  enabled: true
+  listeners:
+    client:
+      protocol: PLAINTEXT
+    interbroker:
+      protocol: PLAINTEXT
+  controller:
+    replicaCount: 0
+  broker:
+    replicaCount: 1
+    minId: 0
+    extraConfig: |
+      message.max.bytes=5242880
+      default.replication.factor=1
+      offsets.topic.replication.factor=1
+      transaction.state.log.replication.factor=1
+  kraft:
+    enabled: false
+  zookeeper:
+    enabled: true
+
