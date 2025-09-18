@@ -26,4 +26,4 @@ jobs:
         uses: actions/checkout@v4
       - name: Run smoke checks
         run: |
-          bash scripts/smoke.sh
+          bash tests/e2e/test_smoke.sh
