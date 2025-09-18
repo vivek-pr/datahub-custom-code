@@ -45,4 +45,3 @@ kafka:
     enabled: false
   zookeeper:
     enabled: true
-

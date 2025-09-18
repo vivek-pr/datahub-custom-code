@@ -60,4 +60,3 @@ Troubleshooting
 Cleanup
 
 - `make pg-purge` (PVC may remain). To fully clean: `kubectl -n datahub delete pvc postgres-data`.
-

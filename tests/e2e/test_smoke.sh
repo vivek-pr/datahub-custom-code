@@ -25,4 +25,3 @@ if [ ! -d artifacts/logs ]; then
   echo "logs directory missing" >&2
   exit 1
 fi
-
