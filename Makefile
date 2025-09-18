@@ -7,6 +7,7 @@ RELEASE_PREREQ ?= prerequisites
 VALUES_DIR ?= infra/helm
 PREREQ_VALUES ?= $(VALUES_DIR)/prerequisites-values.yaml
 DATAHUB_VALUES ?= $(VALUES_DIR)/datahub-values.yaml
+DATAHUB_HEALTH_TIMEOUT ?= 180
 
 # POC orchestration defaults
 ARTIFACTS_DIR ?= artifacts
@@ -131,7 +132,7 @@ datahub-status:
 	@echo "Services in namespace $(NS):"
 	kubectl get svc -n $(NS)
 	@echo "Running health checks..."
-	bash scripts/check_datahub.sh --namespace $(NS) --release $(RELEASE_DATAHUB)
+	bash scripts/check_datahub.sh --namespace $(NS) --release $(RELEASE_DATAHUB) --timeout $(DATAHUB_HEALTH_TIMEOUT)
 
 # Port-forward common services for local access
 datahub-portfw:
