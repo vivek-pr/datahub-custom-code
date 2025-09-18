@@ -94,40 +94,43 @@ if [[ -z "$GMS_URL" ]]; then
   SVC_TYPE=$(kubectl -n "$NS" get svc "$SVC_NAME" -o jsonpath='{.spec.type}' 2>/dev/null || echo "")
   case "$SVC_TYPE" in
     NodePort)
-      NODE_PORT=$(kubectl -n "$NS" get svc "$SVC_NAME" -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null || echo "")
-      if [[ -z "$NODE_PORT" ]]; then
-        echo "Unable to determine nodePort for service '$SVC_NAME'" >&2
+      TARGET_PORT=$(kubectl -n "$NS" get svc "$SVC_NAME" -o jsonpath='{.spec.ports[0].targetPort}' 2>/dev/null || echo "")
+      if [[ -z "$TARGET_PORT" ]]; then
+        TARGET_PORT=$(kubectl -n "$NS" get svc "$SVC_NAME" -o jsonpath='{.spec.ports[0].port}' 2>/dev/null || echo "")
+      fi
+      if [[ -z "$TARGET_PORT" ]]; then
+        echo "Unable to determine target port for service '$SVC_NAME'" >&2
         exit 1
       fi
-      if [[ -z "${MINIKUBE_IP:-}" ]]; then
-        MINIKUBE_IP=$(minikube ip)
-      fi
-      GMS_URL="http://${MINIKUBE_IP}:${NODE_PORT}"
-      DIRECT_CODE=$(curl_code "$GMS_URL/api/health")
-      if [[ "${DIRECT_CODE}" == "000" ]]; then
-        echo "Direct NodePort access to $GMS_URL failed (curl result 000); falling back to 'minikube service --url' proxy." >&2
+      LOCAL_PORT=${GMS_PORT_FORWARD_PORT:-18080}
+      PORTFWD_LOG=${GMS_PORT_FORWARD_LOG:-/tmp/datahub-gms-portfw.log}
+      echo "Port-forwarding svc/$SVC_NAME ${LOCAL_PORT}:${TARGET_PORT} for readiness checks (log: ${PORTFWD_LOG})." >&2
+      kubectl -n "$NS" port-forward svc/"$SVC_NAME" "${LOCAL_PORT}:${TARGET_PORT}" --address 127.0.0.1 >"${PORTFWD_LOG}" 2>&1 &
+      PORT_FORWARD_PID=$!
+      # Wait for port-forward to report ready or fail
+      for i in {1..20}; do
+        if ! kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
+          echo "Port-forward process exited early; see ${PORTFWD_LOG}" >&2
+          break
+        fi
+        if grep -q "Forwarding from" "${PORTFWD_LOG}" 2>/dev/null; then
+          break
+        fi
+        sleep 1
+      done
+      if kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
+        GMS_URL="http://127.0.0.1:${LOCAL_PORT}"
+      else
+        echo "Port-forward could not be established for svc/$SVC_NAME; attempting 'minikube service --url' as fallback." >&2
         set +e
         URLS=$(minikube service -n "$NS" "$SVC_NAME" --url 2>/dev/null)
         RC=$?
         set -e
-        if [[ $RC -eq 0 && -n "$URLS" ]]; then
-          GMS_URL=$(echo "$URLS" | head -n1)
+        if [[ $RC -ne 0 || -z "$URLS" ]]; then
+          echo "Failed to derive GMS URL via port-forward or minikube service." >&2
+          exit 1
         fi
-        PROBE_CODE=$(curl_code "$GMS_URL/api/health")
-        if [[ "${PROBE_CODE}" == "000" ]]; then
-          LOCAL_PORT=${GMS_PORT_FORWARD_PORT:-18080}
-          echo "Establishing temporary port-forward to svc/$SVC_NAME on 127.0.0.1:${LOCAL_PORT} for readiness checks." >&2
-          kubectl -n "$NS" port-forward svc/"$SVC_NAME" "${LOCAL_PORT}:8080" --address 127.0.0.1 >/tmp/datahub-gms-portfw.log 2>&1 &
-          PORT_FORWARD_PID=$!
-          sleep 3
-          if kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
-            GMS_URL="http://127.0.0.1:${LOCAL_PORT}"
-          else
-            echo "Port-forward to svc/$SVC_NAME failed; check /tmp/datahub-gms-portfw.log" >&2
-          fi
-        else
-          echo "Using URL from 'minikube service --url': $GMS_URL" >&2
-        fi
+        GMS_URL=$(echo "$URLS" | head -n1)
       fi
       ;;
     LoadBalancer)
