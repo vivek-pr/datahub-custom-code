@@ -4,6 +4,7 @@ DataHub on Minikube via Helm + Makefile
 
 Quickstart
 
+- One-click smoke test: `make poc:smoke`
 - Start cluster: `make mk-up` (alias: `make mk:up`)
 - Install DataHub: `make datahub-install` (alias: `make datahub:install`)
 - Check health: `make datahub-status` (alias: `make datahub:status`)
