@@ -26,7 +26,7 @@ def make_verifier(tmp_path):
     return POCVerifier(
         namespace="datahub",
         tenant="t001",
-        dataset_urn="urn:li:dataset:1",
+        dataset_urn="urn:li:dataset:(urn:li:dataPlatform:postgres,sandbox.t001.customers,PROD)",
         timeout=5,
         artifacts_dir=tmp_path,
         expect_idempotent=True,

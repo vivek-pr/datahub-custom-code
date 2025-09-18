@@ -41,6 +41,8 @@ artifacts/
 *.pid
 *.seed
 *.pid.lock
+*.pyc
+__pycache__/
 
 # Coverage reports
 coverage/
@@ -57,3 +59,4 @@ jspm_packages/
 *.tgz
 *.7z
 *.rar
+.helm-charts/

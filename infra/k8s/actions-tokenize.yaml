@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: actions-tokenize
+  namespace: datahub
+  labels:
+    app: actions-tokenize
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: actions-tokenize
+  template:
+    metadata:
+      labels:
+        app: actions-tokenize
+    spec:
+      containers:
+        - name: actions-tokenize
+          image: datahub-actions-tokenize:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DATAHUB_GMS_URL
+              value: http://datahub-gms:8080
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: datahub-kafka:9092
+            - name: SCHEMA_REGISTRY_URL
+              value: http://datahub-schema-registry:8081
+            - name: TOKENIZE_CONSUMER_GROUP
+              value: actions-tokenize
+            - name: TOKENIZE_PG_HOST
+              value: postgres
+            - name: TOKENIZE_PG_PORT
+              value: "5432"
+            - name: TOKENIZE_PG_DATABASE
+              value: sandbox
+            - name: TOKENIZE_T001_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: pg-secrets
+                  key: T001_PASSWORD
+            - name: TOKENIZE_T002_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: pg-secrets
+                  key: T002_PASSWORD
+            - name: TOKENIZE_T001_USER
+              value: t001
+            - name: TOKENIZE_T002_USER
+              value: t002
+            - name: TOKENIZE_EXTERNAL_URL_BASE
+              value: http://datahub-frontend:9002/dataset
+            - name: DATAHUB_ENV
+              value: DEV
+            - name: TOKENIZE_DRY_RUN
+              value: "false"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi

@@ -15,9 +15,11 @@ make poc:smoke
 The orchestrator performs three phases:
 
 1. `make poc:up` — starts Minikube, installs the Helm charts, deploys Postgres, seeds
-   data, runs ingestion, and executes the regex classifier.
+   data, runs ingestion, executes the regex classifier, and deploys the tokenization
+   actions worker.
 2. `make poc:verify` — executes `tools/verify_poc.py` which validates the full tokenization
-   flow and writes JSON + JUnit artifacts.
+   flow (cluster health → Postgres → DataHub → tokenization runs → rollback checks) and
+   writes JSON + JUnit artifacts.
 3. `make poc:destroy` — tears everything down (unless `KEEP_CLUSTER=1`).
 
 Artifacts are always written under `artifacts/`:
@@ -49,13 +51,26 @@ Artifacts are always written under `artifacts/`:
 
 `tools/verify_poc.py` orchestrates the assertions described in the issue:
 
-1. Cluster readiness — nodes ready, critical workloads running.
-2. DataHub health — GraphQL health check plus tag roundtrip.
-3. Metadata — ensures the ingested Postgres dataset exists and PII tags are present.
-4. Tokenization run — triggers tokenization and asserts `rowsAffected > 0`.
-5. Idempotency probe — confirms repeated triggers do not mutate data.
-6. Negative path — executes a dry-run request that must fail without data changes.
-7. Observability — captures logs and verifies required log files.
+1. Cluster readiness — nodes ready, namespaces present, critical workloads running.
+2. DataHub health — GraphQL health check plus tag roundtrip to confirm write/read path.
+3. Postgres health — verifies tenant credentials (`SELECT 1`), proves cross-tenant
+   access is denied, and captures a baseline snapshot of PII columns.
+4. Metadata — ensures the ingested dataset exists, records PII-tagged schema fields,
+   and caches the pre-tokenization row set for later comparisons.
+5. Tokenization run — triggers the action, waits for DataHub run metadata, checks that
+   `rowsAffected > 0`, validates the DataProcessInstance context (tenant, columns,
+   external URL), and confirms the database values now match the deterministic token
+   pattern.
+6. Idempotency probe — replays the same `request_id`, asserts the run is successful but
+   `rowsAffected == 0`, and verifies the database snapshot is unchanged.
+7. Negative path — restores the dataset to the baseline values, temporarily revokes the
+   tenant's `UPDATE` grant, triggers another run (expecting failure with zero writes),
+   then re-enables permissions and re-applies tokenization so the system returns to a
+   healthy state.
+8. Observability — collects logs for DataHub + worker pods, confirms the actions log has
+   `tenant_id` and `rows_affected`, verifies a request identifier is available (log or
+   run context), and pings the metrics endpoint when it is exposed via environment
+   configuration.
 
 Each step emits structured status in `report.json`. On failure, the verifier exits non-zero,
 leaving the stack intact for debugging (unless you re-run `make poc:smoke`, which always
@@ -68,9 +83,10 @@ collects logs before teardown).
 | `cluster-health` fails with `missing` workloads | Helm chart still rolling out or pod crashloop | Check `kubectl get pods -n datahub`, inspect pod logs under `artifacts/logs/`. |
 | `datahub-readiness` reports unhealthy | GMS not reachable / misconfigured service | Verify `minikube service -n datahub datahub-datahub-gms --url` and confirm port-forward if running locally. |
 | `ingested-metadata` missing PII tags | Classifier not run or ingestion incomplete | Re-run `make poc:up` to execute ingestion + classifier, ensure classifier pod logs mention tagged fields. |
-| `tokenization` stuck in RUNNING | Tokenization worker not deployed or failing auth | Check `actions` worker logs, confirm database credentials/permissions. |
-| `idempotency` reports additional writes | Token detection regex mismatch | Inspect `summarize_tokenization` logic in `tools/verify_poc.py` and adjust token format/pattern. |
-| `negative-path` mutates data | DB permission drop not applied | Ensure failure path toggles permissions correctly; confirm run history in DataHub UI. |
+| `tokenization` stuck in RUNNING | Tokenization worker not deployed or failing auth | Check `actions` worker logs, confirm database credentials/permissions, and ensure `TOKENIZE_*` env vars reference valid secrets. |
+| `idempotency` reports additional writes | Token detection regex mismatch or stale snapshot | Inspect `summarize_tokenization` logic in `tools/verify_poc.py`, confirm dataset values already tokenized before replay. |
+| `negative-path` mutates data | DB permission drop not applied | Ensure the verifier can reach the Postgres pod and that `pg-secrets` contains the admin password so revokes succeed. |
+| Observability step fails on metrics | Metrics port disabled or curl missing | Either set `TOKENIZE_METRICS_PORT` when deploying or install `curl`/`wget` into the container image. |
 
 ## CI Integration
 

@@ -35,7 +35,7 @@ MK_CPUS ?= 4
 MK_MEMORY ?= 8192
 MK_DISK ?= 40g
 
-.PHONY: mk-up mk-status helm-repo datahub-install datahub-uninstall datahub-status datahub-portfw datahub-portfw-stop datahub-test-integration datahub-test-e2e pg-up pg-load pg-ingest pg-purge classifier-run classifier\:run poc-up poc-verify poc-destroy poc-smoke poc-logs poc\:up poc\:verify poc\:destroy poc\:smoke poc\:logs
+.PHONY: mk-up mk-status helm-repo datahub-install datahub-uninstall datahub-status datahub-portfw datahub-portfw-stop datahub-test-integration datahub-test-e2e pg-up pg-load pg-ingest pg-purge classifier-run classifier\:run poc-up poc-verify poc-destroy poc-smoke poc-logs poc\:up poc\:verify poc\:destroy poc\:smoke poc\:logs actions-image actions-up actions-down actions-logs actions\:image actions\:up actions\:down actions\:logs
 
 mk-up:
 	@echo "Starting Minikube with $(MK_CPUS) CPUs, $(MK_MEMORY)MB RAM, $(MK_DISK) disk..."
@@ -198,6 +198,30 @@ datahub\:uninstall:
 	@$(MAKE) datahub-uninstall
 datahub\:status:
 	@$(MAKE) datahub-status
+
+actions-image:
+	docker build -t datahub-actions-tokenize:latest -f services/actions-tokenize/Dockerfile .
+
+actions-up: actions-image
+	kubectl -n $(NS) apply -f infra/k8s/actions-tokenize.yaml
+
+actions-down:
+	kubectl -n $(NS) delete -f infra/k8s/actions-tokenize.yaml --ignore-not-found
+
+actions-logs:
+	kubectl -n $(NS) logs deploy/actions-tokenize -f
+
+actions\:image:
+	@$(MAKE) actions-image
+
+actions\:up:
+	@$(MAKE) actions-up
+
+actions\:down:
+	@$(MAKE) actions-down
+
+actions\:logs:
+	@$(MAKE) actions-logs
 datahub\:portfw:
 	@$(MAKE) datahub-portfw
 datahub\:portfw\:stop:
@@ -241,7 +265,9 @@ poc-up:
 	echo "[poc] ingesting metadata"; \
 	$(MAKE) pg-ingest; \
 	echo "[poc] running classifier"; \
-	$(MAKE) classifier-run
+	$(MAKE) classifier-run; \
+	echo "[poc] deploying actions worker"; \
+	$(MAKE) actions-up
 
 poc-verify:
 	@set -euo pipefail; \
@@ -252,6 +278,8 @@ poc-verify:
 
 poc-destroy:
 	@set -euo pipefail; \
+	echo "[poc] removing actions deployment"; \
+	$(MAKE) actions-down; \
 	echo "[poc] tearing down DataHub releases"; \
 	$(MAKE) datahub-uninstall; \
 	echo "[poc] removing Postgres resources"; \

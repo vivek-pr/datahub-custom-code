@@ -13,6 +13,7 @@ Quickstart
 Docs
 
 - Full setup & troubleshooting: `docs/20_datahub.md`
+- One-click verifier workflow: `docs/95_verifier.md`
 
 What’s included
 

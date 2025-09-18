@@ -2,9 +2,11 @@ import pytest
 
 from tools.verify_poc import (
     VerificationError,
+    ensure_unique_tags,
     evaluate_run_transitions,
     extract_schema_field_tags,
-    ensure_unique_tags,
+    parse_postgres_dataset_urn,
+    sql_literal,
 )
 
 
@@ -68,3 +70,24 @@ def test_evaluate_run_transitions_negative_expectation():
     states = ["RUNNING", "FAILED"]
     result = evaluate_run_transitions(states, expect_success=False)
     assert result["final"] == "FAILED"
+
+
+def test_parse_postgres_dataset_urn_happy_path():
+    database, schema, table = parse_postgres_dataset_urn(
+        "urn:li:dataset:(urn:li:dataPlatform:postgres,sandbox.t001.customers,PROD)"
+    )
+    assert database == "sandbox"
+    assert schema == "t001"
+    assert table == "customers"
+
+
+def test_parse_postgres_dataset_urn_invalid():
+    with pytest.raises(VerificationError):
+        parse_postgres_dataset_urn("urn:li:dataset:invalid")
+
+
+def test_sql_literal_handles_common_types():
+    assert sql_literal("O'Hare") == "'O''Hare'"
+    assert sql_literal(10) == "10"
+    assert sql_literal(True) == "TRUE"
+    assert sql_literal(None) == "NULL"

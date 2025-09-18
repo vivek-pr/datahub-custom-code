@@ -1,0 +1,61 @@
+pipeline:
+  name: tokenize-now
+  source:
+    type: mcl_kafka
+    config:
+      connection:
+        bootstrap: ${KAFKA_BOOTSTRAP_SERVERS:-datahub-kafka:9092}
+      consumer_group_id: ${TOKENIZE_CONSUMER_GROUP:-actions-tokenize}
+      topic: ${MCL_TOPIC:-MetadataChangeLog_Versioned_v2}
+      auto_offset_reset: latest
+      schema_registry_url: ${SCHEMA_REGISTRY_URL:-http://schema-registry:8081}
+  sink:
+    type: noop
+actions:
+  - type: python
+    name: tokenize-action
+    config:
+      className: actions_tokenize.action.TokenizeAction
+      params:
+        token_tag: ${TOKENIZE_TAG:-urn:li:tag:tokenize-now}
+        pii_tag_prefix: ${TOKENIZE_PII_PREFIX:-urn:li:tag:pii-}
+        dataset_platforms:
+          - postgres
+        regex_token_pattern: ${TOKENIZE_REGEX_PATTERN:-^tok_.+_poc$}
+        use_base64_tokens: ${TOKENIZE_USE_BASE64:-true}
+        dry_run: ${TOKENIZE_DRY_RUN:-false}
+        run_id_prefix: ${TOKENIZE_RUN_ID_PREFIX:-tokenize}
+        actor_urn: ${TOKENIZE_ACTOR_URN:-urn:li:corpuser:tokenize-action}
+        external_url_base: ${TOKENIZE_EXTERNAL_URL_BASE:-}
+        dataflow:
+          orchestrator: ${TOKENIZE_DATAFLOW_ORCHESTRATOR:-actions-tokenize}
+          flow_id: ${TOKENIZE_DATAFLOW_ID:-tokenize}
+          env: ${DATAHUB_ENV:-DEV}
+          name: ${TOKENIZE_DATAFLOW_NAME:-Tokenize Action Flow}
+          description: ${TOKENIZE_DATAFLOW_DESCRIPTION:-Tokenization action orchestrated inside DataHub}
+          custom_properties:
+            owner: actions-tokenize
+        datajob:
+          job_id: ${TOKENIZE_DATAJOB_ID:-tokenize-action}
+          name: ${TOKENIZE_DATAJOB_NAME:-Tokenize Action Job}
+          description: ${TOKENIZE_DATAJOB_DESCRIPTION:-Runs tokenization updates in Postgres for tagged datasets}
+          external_url: ${TOKENIZE_DATAJOB_URL:-}
+          custom_properties:
+            source: actions-tokenize
+        postgres:
+          host: ${TOKENIZE_PG_HOST:-postgres}
+          port: ${TOKENIZE_PG_PORT:-5432}
+          database: ${TOKENIZE_PG_DATABASE:-sandbox}
+          application_name: datahub-actions-tokenize
+          connect_timeout_seconds: ${TOKENIZE_PG_TIMEOUT:-10}
+          tenants:
+            - tenant_id: t001
+              username: ${TOKENIZE_T001_USER:-t001}
+              password: ${TOKENIZE_T001_PASSWORD}
+            - tenant_id: t002
+              username: ${TOKENIZE_T002_USER:-t002}
+              password: ${TOKENIZE_T002_PASSWORD}
+          default_search_path: ${TOKENIZE_PG_SEARCH_PATH:-}
+        runtime_custom_properties:
+          orchestrator: actions
+          poc: tokenize
