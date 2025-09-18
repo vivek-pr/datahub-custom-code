@@ -27,6 +27,23 @@ trap cleanup EXIT
 RELEASE=""
 SERVICE_NAME=""
 
+curl_code() {
+  local url="$1"
+  shift
+  curl --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" -fsS -o /dev/null -w "%{http_code}" "$@" "$url" || true
+}
+
+http_ok() {
+  local url="$1"
+  curl_code "$url"
+}
+
+graphql_post() {
+  local url="$1"
+  local body='{"query":"query { __typename }"}'
+  curl_code "$url" -H 'Content-Type: application/json' -X POST --data "$body"
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --namespace|-n)
@@ -146,23 +163,6 @@ echo "Using GMS URL: $GMS_URL"
 
 start_time=$(date +%s)
 deadline=$(( start_time + TIMEOUT ))
-
-curl_code() {
-  local url="$1"
-  shift
-  curl --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" -fsS -o /dev/null -w "%{http_code}" "$@" "$url" || true
-}
-
-http_ok() {
-  local url="$1"
-  curl_code "$url"
-}
-
-graphql_post() {
-  local url="$1"
-  local body='{"query":"query { __typename }"}'
-  curl_code "$url" -H 'Content-Type: application/json' -X POST --data "$body"
-}
 
 echo "Checking GraphiQL (/api/graphiql) availability (timeout: ${TIMEOUT}s)..."
 attempt=0
