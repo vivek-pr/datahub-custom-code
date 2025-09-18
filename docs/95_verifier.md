@@ -46,6 +46,9 @@ Artifacts are always written under `artifacts/`:
 - `POC_TIMEOUT` controls verifier polling duration (default `1200` seconds).
 - `POC_TENANT`, `POC_DATASET_URN`, and `POC_REQUEST_ID` tweak verifier defaults.
 - `DATAHUB_GMS` overrides the inferred GMS endpoint (otherwise resolved via `minikube service`).
+- `HELM_USE_LOCAL_CHARTS=1 SKIP_HELM_FETCH=1 make …` forces the installer to use the vendored
+  charts under `.helm-charts/` without reaching out to `helm.acryldata.io`. CI enables this mode
+  automatically so smoke tests stay deterministic even when outbound DNS is restricted.
 
 ## Verifier Details
 

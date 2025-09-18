@@ -17,6 +17,10 @@ POC_TIMEOUT ?= 1200
 POC_TENANT ?= t001
 POC_DATASET_URN ?= urn:li:dataset:(urn:li:dataPlatform:postgres,sandbox.$(POC_TENANT).customers,PROD)
 POC_REQUEST_ID ?= poc-smoke
+USE_LOCAL_HELM_CHARTS ?= $(HELM_USE_LOCAL_CHARTS)
+USE_LOCAL_HELM_CHARTS ?= 0
+HELM_FETCH_SKIP ?= $(SKIP_HELM_FETCH)
+HELM_FETCH_SKIP ?= 0
 
 # Helm sources
 HELM_REPO_NAME ?= acryldata
@@ -35,7 +39,7 @@ MK_CPUS ?= 4
 MK_MEMORY ?= 8192
 MK_DISK ?= 40g
 
-.PHONY: mk-up mk-status helm-repo datahub-install datahub-uninstall datahub-status datahub-portfw datahub-portfw-stop datahub-test-integration datahub-test-e2e pg-up pg-load pg-ingest pg-purge classifier-run classifier\:run poc-up poc-verify poc-destroy poc-smoke poc-logs poc\:up poc\:verify poc\:destroy poc\:smoke poc\:logs actions-image actions-up actions-down actions-logs actions\:image actions\:up actions\:down actions\:logs
+.PHONY: mk-up mk-status helm-repo helm-fetch helm-ensure-local datahub-install datahub-uninstall datahub-status datahub-portfw datahub-portfw-stop datahub-test-integration datahub-test-e2e pg-up pg-load pg-ingest pg-purge classifier-run classifier\:run poc-up poc-verify poc-destroy poc-smoke poc-logs poc\:up poc\:verify poc\:destroy poc\:smoke poc\:logs actions-image actions-up actions-down actions-logs actions\:image actions\:up actions\:down actions\:logs
 
 mk-up:
 	@echo "Starting Minikube with $(MK_CPUS) CPUs, $(MK_MEMORY)MB RAM, $(MK_DISK) disk..."
@@ -46,6 +50,10 @@ mk-status:
 	minikube status
 
 helm-repo:
+	@if [ "$(USE_LOCAL_HELM_CHARTS)" = "1" ]; then \
+		echo "[helm] USE_LOCAL_HELM_CHARTS=1 set, skipping remote repo add"; \
+		exit 0; \
+	fi
 	@echo "Ensuring acryldata Helm repo is added..."
 	@if ! helm repo list | awk '{print $$1}' | grep -q "^$(HELM_REPO_NAME)$$"; then \
 		echo "Adding $(HELM_REPO_NAME) Helm repo..."; \
@@ -58,22 +66,54 @@ helm-fetch:
 	@echo "Fetching fallback charts from GitHub into $(HELM_CHART_REPO_DIR) ..."
 	@mkdir -p $(dir $(HELM_CHART_REPO_DIR))
 	@if [ -d "$(HELM_CHART_REPO_DIR)/.git" ]; then \
-		git -C "$(HELM_CHART_REPO_DIR)" fetch --all --tags && git -C "$(HELM_CHART_REPO_DIR)" checkout -qf $(HELM_CHART_REF) && git -C "$(HELM_CHART_REPO_DIR)" reset --hard; \
+		if [ "$(HELM_FETCH_SKIP)" = "1" ]; then \
+			echo "[helm] HELM_FETCH_SKIP=1 set, skipping git fetch"; \
+		else \
+			git -C "$(HELM_CHART_REPO_DIR)" fetch --all --tags && git -C "$(HELM_CHART_REPO_DIR)" checkout -qf $(HELM_CHART_REF) && git -C "$(HELM_CHART_REPO_DIR)" reset --hard; \
+		fi; \
 	else \
-		git clone --depth 1 --branch $(HELM_CHART_REF) https://github.com/acryldata/datahub-helm.git "$(HELM_CHART_REPO_DIR)"; \
+		if [ "$(HELM_FETCH_SKIP)" = "1" ]; then \
+			echo "[helm] HELM_FETCH_SKIP=1 but local charts missing at $(HELM_CHART_REPO_DIR)"; \
+			exit 1; \
+		else \
+			git clone --depth 1 --branch $(HELM_CHART_REF) https://github.com/acryldata/datahub-helm.git "$(HELM_CHART_REPO_DIR)"; \
+		fi; \
+	fi
+
+helm-ensure-local:
+	@if [ ! -d "$(HELM_CHART_DATAHUB_PATH)" ] || [ ! -d "$(HELM_CHART_PREREQ_PATH)" ]; then \
+		if [ "$(HELM_FETCH_SKIP)" = "1" ]; then \
+			echo "[helm] Local charts missing but HELM_FETCH_SKIP=1; expected paths: $(HELM_CHART_DATAHUB_PATH)"; \
+			exit 1; \
+		else \
+			$(MAKE) helm-fetch; \
+		fi; \
 	fi
 
 datahub-install: helm-repo
 	@echo "Creating namespace $(NS) if not exists..."
 	kubectl get ns $(NS) >/dev/null 2>&1 || kubectl create ns $(NS)
-	@echo "Installing/upgrading prerequisites (Kafka, Zookeeper, Elasticsearch, DB)..."
-	( helm upgrade --install $(RELEASE_PREREQ) $(HELM_REPO_CHART_PREREQ) -n $(NS) -f $(PREREQ_VALUES) ) || \
-	( echo "Repo install failed; using local fallback chart" && $(MAKE) helm-fetch && \
-	helm upgrade --install $(RELEASE_PREREQ) $(HELM_CHART_PREREQ_PATH) -n $(NS) -f $(PREREQ_VALUES) --dependency-update )
-	@echo "Installing/upgrading DataHub..."
-	( helm upgrade --install $(RELEASE_DATAHUB) $(HELM_REPO_CHART_DATAHUB) -n $(NS) -f $(DATAHUB_VALUES) ) || \
-	( echo "Repo install failed; using local fallback chart" && $(MAKE) helm-fetch && \
-	helm upgrade --install $(RELEASE_DATAHUB) $(HELM_CHART_DATAHUB_PATH) -n $(NS) -f $(DATAHUB_VALUES) --dependency-update )
+	@if [ "$(USE_LOCAL_HELM_CHARTS)" = "1" ]; then \
+		echo "Installing prerequisites from local charts"; \
+		$(MAKE) helm-ensure-local; \
+		if [ "$(HELM_FETCH_SKIP)" = "1" ]; then \
+			DEP_ARGS=""; \
+		else \
+			DEP_ARGS="--dependency-update"; \
+		fi; \
+		helm upgrade --install $(RELEASE_PREREQ) $(HELM_CHART_PREREQ_PATH) -n $(NS) -f $(PREREQ_VALUES) $$DEP_ARGS; \
+		echo "Installing DataHub from local charts"; \
+		helm upgrade --install $(RELEASE_DATAHUB) $(HELM_CHART_DATAHUB_PATH) -n $(NS) -f $(DATAHUB_VALUES) $$DEP_ARGS; \
+	else \
+		echo "Installing/upgrading prerequisites (Kafka, Zookeeper, Elasticsearch, DB)..."; \
+		( helm upgrade --install $(RELEASE_PREREQ) $(HELM_REPO_CHART_PREREQ) -n $(NS) -f $(PREREQ_VALUES) ) || \
+		( echo "Repo install failed; using local fallback chart" && $(MAKE) helm-ensure-local && \
+		helm upgrade --install $(RELEASE_PREREQ) $(HELM_CHART_PREREQ_PATH) -n $(NS) -f $(PREREQ_VALUES) --dependency-update ); \
+		echo "Installing/upgrading DataHub..."; \
+		( helm upgrade --install $(RELEASE_DATAHUB) $(HELM_REPO_CHART_DATAHUB) -n $(NS) -f $(DATAHUB_VALUES) ) || \
+		( echo "Repo install failed; using local fallback chart" && $(MAKE) helm-ensure-local && \
+		helm upgrade --install $(RELEASE_DATAHUB) $(HELM_CHART_DATAHUB_PATH) -n $(NS) -f $(DATAHUB_VALUES) --dependency-update ); \
+	fi
 	@echo "Waiting for DataHub pods to be ready..."
 	kubectl wait --for=condition=Ready pods --all -n $(NS) --timeout=10m || true
 	@$(MAKE) datahub-status
