@@ -8,6 +8,16 @@ VALUES_DIR ?= infra/helm
 PREREQ_VALUES ?= $(VALUES_DIR)/prerequisites-values.yaml
 DATAHUB_VALUES ?= $(VALUES_DIR)/datahub-values.yaml
 
+# POC orchestration defaults
+ARTIFACTS_DIR ?= artifacts
+VERIFY_ARTIFACTS_DIR ?= $(ARTIFACTS_DIR)/verify
+LOG_ARTIFACTS_DIR ?= $(ARTIFACTS_DIR)/logs
+ENV_ARTIFACTS_DIR ?= $(ARTIFACTS_DIR)/env
+POC_TIMEOUT ?= 1200
+POC_TENANT ?= t001
+POC_DATASET_URN ?= urn:li:dataset:(urn:li:dataPlatform:postgres,sandbox.$(POC_TENANT).customers,PROD)
+POC_REQUEST_ID ?= poc-smoke
+
 # Helm sources
 HELM_REPO_NAME ?= acryldata
 HELM_REPO_URL ?= https://helm.acryldata.io
@@ -25,7 +35,7 @@ MK_CPUS ?= 4
 MK_MEMORY ?= 8192
 MK_DISK ?= 40g
 
-.PHONY: mk-up mk-status helm-repo datahub-install datahub-uninstall datahub-status datahub-portfw datahub-portfw-stop datahub-test-integration datahub-test-e2e pg-up pg-load pg-ingest pg-purge classifier-run classifier\:run
+.PHONY: mk-up mk-status helm-repo datahub-install datahub-uninstall datahub-status datahub-portfw datahub-portfw-stop datahub-test-integration datahub-test-e2e pg-up pg-load pg-ingest pg-purge classifier-run classifier\:run poc-up poc-verify poc-destroy poc-smoke poc-logs poc\:up poc\:verify poc\:destroy poc\:smoke poc\:logs
 
 mk-up:
 	@echo "Starting Minikube with $(MK_CPUS) CPUs, $(MK_MEMORY)MB RAM, $(MK_DISK) disk..."
@@ -204,3 +214,97 @@ classifier-run:
 
 classifier\:run:
 	@$(MAKE) classifier-run
+
+# ---------- POC automation ----------
+
+poc-up:
+	@set -euo pipefail; \
+	echo "[poc] creating artifact directories"; \
+	mkdir -p $(ARTIFACTS_DIR) $(VERIFY_ARTIFACTS_DIR) $(LOG_ARTIFACTS_DIR) $(ENV_ARTIFACTS_DIR); \
+	{ \
+	        echo "# Environment summary generated on $$(date -u +"%Y-%m-%dT%H:%M:%SZ")"; \
+	        echo "## Minikube"; \
+	        (minikube version || true); \
+	        echo "## kubectl"; \
+	        (kubectl version --short || true); \
+	        echo "## helm"; \
+	        (helm version --short || true); \
+	} > $(ENV_ARTIFACTS_DIR)/summary.txt; \
+	echo "[poc] starting Minikube cluster"; \
+	$(MAKE) mk-up; \
+	echo "[poc] installing DataHub Helm charts"; \
+	$(MAKE) datahub-install; \
+	echo "[poc] deploying Postgres sandbox"; \
+	$(MAKE) pg-up; \
+	echo "[poc] seeding Postgres"; \
+	$(MAKE) pg-load; \
+	echo "[poc] ingesting metadata"; \
+	$(MAKE) pg-ingest; \
+	echo "[poc] running classifier"; \
+	$(MAKE) classifier-run
+
+poc-verify:
+	@set -euo pipefail; \
+	mkdir -p $(VERIFY_ARTIFACTS_DIR); \
+	echo "[poc] running verifier"; \
+	python3 -m venv .venv && . .venv/bin/activate && pip install -U pip && pip install -r tools/requirements.txt; \
+	. .venv/bin/activate && python tools/verify_poc.py --namespace $(NS) --tenant $(POC_TENANT) --dataset-urn $(POC_DATASET_URN) --timeout $(POC_TIMEOUT) --artifacts-dir $(ARTIFACTS_DIR) --expect-idempotent --request-id $(POC_REQUEST_ID)
+
+poc-destroy:
+	@set -euo pipefail; \
+	echo "[poc] tearing down DataHub releases"; \
+	$(MAKE) datahub-uninstall; \
+	echo "[poc] removing Postgres resources"; \
+	$(MAKE) pg-purge; \
+	if [ "$${KEEP_CLUSTER:-0}" != "1" ]; then \
+	        echo "[poc] stopping Minikube"; \
+	        minikube stop || true; \
+	else \
+	        echo "[poc] KEEP_CLUSTER=1 set, skipping minikube stop"; \
+	fi
+
+poc-logs:
+	@set -euo pipefail; \
+	mkdir -p $(LOG_ARTIFACTS_DIR); \
+	echo "[poc] collecting pod logs into $(LOG_ARTIFACTS_DIR)"; \
+	PODS=$$(kubectl -n $(NS) get pods -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true); \
+	for pod in $$PODS; do \
+	        case "$$pod" in \
+	                *datahub*|*postgres*|*classifier*|*actions*) \
+	                        kubectl -n $(NS) logs "$$pod" > "$(LOG_ARTIFACTS_DIR)/$${pod}.log" 2>/dev/null || true; \
+	                        ;; \
+	                *) \
+	                        ;; \
+	        esac; \
+	done
+
+poc-smoke:
+	@set -euo pipefail; \
+	cleanup() { \
+	        rc=$$?; \
+	        if [ "$${KEEP_CLUSTER:-0}" = "1" ]; then \
+	                $(MAKE) poc-logs || true; \
+	        else \
+	                $(MAKE) poc-logs || true; \
+	                $(MAKE) poc-destroy || true; \
+	        fi; \
+	        exit $$rc; \
+	}; \
+	trap cleanup EXIT; \
+	$(MAKE) poc-up; \
+	$(MAKE) poc-verify
+
+poc\:up:
+	@$(MAKE) poc-up
+
+poc\:verify:
+	@$(MAKE) poc-verify
+
+poc\:destroy:
+	@$(MAKE) poc-destroy
+
+poc\:logs:
+	@$(MAKE) poc-logs
+
+poc\:smoke:
+	@$(MAKE) poc-smoke

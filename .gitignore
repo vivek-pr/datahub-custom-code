@@ -24,6 +24,7 @@ Thumbs.db
 dist/
 build/
 out/
+artifacts/
 
 # Environment variables
 .env
