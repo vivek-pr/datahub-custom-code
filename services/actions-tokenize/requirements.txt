@@ -1,3 +1,0 @@
-acryl-datahub>=0.12.1.4
-psycopg2-binary>=2.9
-pydantic>=1.10

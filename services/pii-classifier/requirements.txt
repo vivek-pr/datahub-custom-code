@@ -1,3 +1,0 @@
-acryl-datahub>=0.13.4
-psycopg2-binary>=2.9
-PyYAML>=6.0
