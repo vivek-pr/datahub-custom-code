@@ -1,0 +1,30 @@
+primary:
+  persistence:
+    enabled: false
+  initdbScripts:
+    seed-db.sql: |
+      CREATE USER tokenize WITH PASSWORD 'tokenize';
+      CREATE DATABASE tokenize OWNER tokenize;
+      \connect tokenize;
+      CREATE SCHEMA IF NOT EXISTS schema;
+      CREATE TABLE IF NOT EXISTS schema.customers (
+        id SERIAL PRIMARY KEY,
+        email TEXT,
+        phone TEXT
+      );
+  podSecurityContext:
+    enabled: true
+    fsGroup: 1001
+  containerSecurityContext:
+    enabled: true
+    runAsUser: 1001
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+auth:
+  database: tokenize
+  username: tokenize
+  password: tokenize
+  postgresPassword: postgres
+fullnameOverride: postgresql
