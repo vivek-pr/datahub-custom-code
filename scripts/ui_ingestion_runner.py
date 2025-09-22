@@ -27,10 +27,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from actions.base64_action.action import (  # noqa: E402
-    ActionConfig,
-    Base64EncodeAction,
-    RuntimeOverrides,
+from actions.base64_action.action import RuntimeOverrides  # noqa: E402
+from scripts.run_classifier_and_encode import (  # noqa: E402
+    run_once as run_classifier_and_encode,
 )
 
 DEFAULT_ACTOR = "urn:li:corpuser:ui_ingestion_runner"
@@ -655,17 +654,21 @@ def trigger_tokenization(recipe: Dict) -> None:
         schema_allowlist=extract_schema_allowlist(recipe),
     )
     LOGGER.info(
-        "Triggering Base64 tokenization for pipeline %s targeting database %s",
+        "Triggering PII classification for pipeline %s targeting database %s",
         overrides.pipeline_name,
         overrides.database_name,
     )
-    action_config = ActionConfig.load(overrides=overrides)
-    action = Base64EncodeAction(action_config)
-    try:
-        action.process_once()
-    finally:
-        action.conn.close()
-    LOGGER.info("Tokenization for pipeline %s finished", overrides.pipeline_name)
+    allowlist = run_classifier_and_encode(
+        pipeline_name=overrides.pipeline_name,
+        platform=overrides.platform,
+        schema_allowlist=overrides.schema_allowlist,
+        overrides=overrides,
+    )
+    LOGGER.info(
+        "Classifier + encoder finished for pipeline %s (tables processed=%d)",
+        overrides.pipeline_name,
+        len(allowlist),
+    )
 
 
 def verify_postgres_connection(recipe: Dict) -> None:
