@@ -11,12 +11,6 @@ on:
 jobs:
   poc-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-    env:
-      MINIKUBE_HOME: ${{ github.workspace }}/.minikube
-      KUBECONFIG: ${{ github.workspace }}/.kube/config
-      HELM_USE_LOCAL_CHARTS: '1'
-      SKIP_HELM_FETCH: '1'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,43 +18,13 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
-      - name: Install tooling
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y conntrack socat jq
-          curl -Lo kubectl https://storage.googleapis.com/kubernetes-release/release/v1.30.0/bin/linux/amd64/kubectl
-          sudo install kubectl /usr/local/bin/kubectl
-          curl -fsSL https://get.helm.sh/helm-v3.14.4-linux-amd64.tar.gz | tar zx
-          sudo install linux-amd64/helm /usr/local/bin/helm
-          rm -rf linux-amd64
-          curl -Lo minikube https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
-          sudo install minikube /usr/local/bin/minikube
-
-      - name: Start Minikube
-        run: |
-          mkdir -p "$MINIKUBE_HOME" "$HOME/.kube"
-          minikube start --driver=docker --cpus=4 --memory=8192 --disk-size=40g
-          kubectl get nodes
-
-      - name: Run smoke test
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r services/pii-classifier/requirements.txt
-          KEEP_CLUSTER=0 make poc:smoke
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
 
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: poc-artifacts
-          path: |
-            artifacts
-            .minikube/logs
-            .kube
-
-      - name: Delete Minikube
-        if: always()
-        run: |
-          minikube delete || true
+      - name: Run smoke tests
+        run: pytest -m smoke
