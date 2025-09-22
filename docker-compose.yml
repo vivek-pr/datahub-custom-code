@@ -40,6 +40,8 @@ services:
       retries: 10
       start_period: 20s
     restart: unless-stopped
+    ports:
+      - "9092:9092"
 
   schema-registry:
     image: bitnami/schema-registry:7.6.1
@@ -56,17 +58,39 @@ services:
       timeout: 10s
       retries: 10
     restart: unless-stopped
+    ports:
+      - "8081:8081"
 
   kafka-setup:
-    image: bitnami/kafka:3.8.0
+    <<: *runner-image
     depends_on:
       kafka:
         condition: service_healthy
       schema-registry:
         condition: service_healthy
-    entrypoint: ["/bin/bash", "/scripts/create-topics.sh"]
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - SCHEMA_REGISTRY_URL=http://schema-registry:8081
+    command: ["python", "-u", "scripts/kafka_bootstrap.py", "bootstrap"]
     volumes:
-      - ./scripts:/scripts:ro
+      - ./:/workspace:ro
+    restart: "no"
+
+  kafka-autoheal:
+    <<: *runner-image
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+      kafka-setup:
+        condition: service_completed_successfully
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - SCHEMA_REGISTRY_URL=http://schema-registry:8081
+    command: ["python", "-u", "scripts/kafka_bootstrap.py", "check"]
+    volumes:
+      - ./:/workspace:ro
     restart: "no"
 
   mysql:
@@ -146,6 +170,8 @@ services:
         condition: service_completed_successfully
       kafka-setup:
         condition: service_completed_successfully
+      kafka-autoheal:
+        condition: service_completed_successfully
     environment:
       - BACKFILL_BROWSE_PATHS_V2=true
       - DATAHUB_GMS_HOST=datahub-gms
@@ -180,6 +206,8 @@ services:
         condition: service_healthy
       schema-registry:
         condition: service_healthy
+      kafka-autoheal:
+        condition: service_completed_successfully
     environment:
       - DATAHUB_SERVER_TYPE=quickstart
       - DATAHUB_TELEMETRY_ENABLED=true
@@ -232,6 +260,8 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
+      kafka-autoheal:
+        condition: service_completed_successfully
     environment:
       - KAFKA_BOOTSTRAP_SERVER=kafka:9092
       - KAFKA_SCHEMAREGISTRY_URL=http://schema-registry:8081
@@ -260,6 +290,8 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
+      kafka-autoheal:
+        condition: service_completed_successfully
     environment:
       - KAFKA_BOOTSTRAP_SERVER=kafka:9092
       - KAFKA_SCHEMAREGISTRY_URL=http://schema-registry:8081
