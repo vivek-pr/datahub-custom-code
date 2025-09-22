@@ -16,55 +16,78 @@ It is meant for local experimentation only: no hardening, no production security
 - `make psql` — open a `psql` shell against the demo Postgres database
 - `make down` — stop and remove containers, networks, and volumes
 
-## Run from Frontend
-1. Browse to `http://localhost:9002` and sign in (default credentials: `datahub` / `datahub`).
-   _Screenshot placeholder: DataHub home page_
-2. Open **Ingestion → Sources**, click **+ New Source**, and pick the **Postgres** tile.
-   _Screenshot placeholder: Postgres source wizard_
-   - Give the source a friendly name such as `Postgres Demo`.
-   - Set the **Pipeline Name** to `postgres_local_poc` so it matches the CLI recipe and Base64 action filter.
-   - Expand **Advanced recipe** and paste the same YAML used by `make ingest`:
+## Run from UI
+1. Launch `http://localhost:9002`, sign in (`datahub` / `datahub`), and add a **Postgres** source. Paste the provided recipe from the task description or reuse `ingest/postgres_recipe.yml`.
 
-     ```yaml
-     pipeline_name: postgres_local_poc
-     source:
-       type: postgres
-       config:
-         host_port: postgres:5432
-         database: postgres
-         username: datahub
-         password: datahub
-         schema_pattern:
-           allow:
-             - public.*
-         profiling:
-           enabled: false
-     sink:
-       type: datahub-rest
-       config:
-         server: http://datahub-gms:8080
-     ```
-     _(Keeping `pipeline_name` in the YAML is optional but keeps the CLI and UI recipes identical.)_
-
-3. Click **Next → Test Connection** (should succeed) and **Next → Schedule & Run**. Leave the schedule as **On Demand** and hit **Run**.
-   _Screenshot placeholder: Schedule & Run step_
-4. Watch the run under **Ingestion → Runs**. It will briefly show **Pending** until the local `ui-ingestion-runner` helper container replays the recipe, then flip to **Running → Succeeded** with inline logs.
-   - Tail progress via `docker compose logs -f ui-ingestion-runner` if you want to see the CLI output.
-   _Screenshot placeholder: Ingestion run list_
-5. The Base64 action container notices the new metadata and performs tokenization automatically. Tail logs with `make logs` and look for entries like:
-
-   ```text
-   base64-action   | INFO  Processing 3 dataset(s) for run id scan-1700001234
-   base64-action   | INFO  Encoding urn:li:dataset:(urn:li:dataPlatform:postgres,postgres.public.customers,PROD) => public.customers (text columns: first_name, email)
-   base64-action   | INFO  Finished encoding urn:li:dataset:(...,orders,PROD) (120 rows)
+   ```yaml
+   pipeline_name: urn:li:dataHubIngestionSource:0ce41f93-2590-40e5-8f25-fbc7b2433170
+   source:
+     type: postgres
+     config:
+       host_port: host.docker.internal:5432
+       database: lseat
+       username: postgres
+       password: postgres
+       schema_pattern:
+         allow:
+           - public.*
+       profiling:
+         enabled: true
+         profile_table_level_only: true
    ```
 
-6. **Option B helper**: if you ever want to trigger the action once on demand (for example, immediately after a UI run finishes), execute `./scripts/tokenize-once.sh`. It calls `python action.py --once` inside the running container.
-7. Acceptance checks:
-   - `make psql` → `\dn+` should show an `encoded` schema.
-   - `SELECT COUNT(*) FROM encoded.customers;` matches the `public.customers` row count.
-   - Action logs contain `Processing ... dataset(s)` aligned with the ingestion run timestamp.
-   - The Ingestion Runs page displays the job as **Succeeded** with the same run ID as the UI trigger.
+   _Expected helper logs while the recipe is normalized for containers:_
+
+   ```text
+   ui-ingestion-runner | INFO [ui-runner] Prepared recipe for urn:li:dataHubExecutionRequest:... (pipeline=urn:li:dataHubIngestionSource:0ce41f93-...)
+   ui-ingestion-runner | INFO [ui-runner] Starting ingestion for urn:li:dataHubExecutionRequest:... using executor ui-ingestion-runner (pipeline=...)
+   ui-ingestion-runner | INFO [ui-runner] Ingestion and tokenization for urn:li:dataHubExecutionRequest:... completed successfully
+   ```
+
+2. Open **Ingestion → Runs**. The run should advance from **PENDING → RUNNING → SUCCEEDED** with logs.
+
+   ```text
+   ui-ingestion-runner | INFO [ui-runner] Detected pending execution urn:li:dataHubExecutionRequest:...
+   datahub-frontend   | ... Run status transitioned to RUNNING (logs streaming)
+   ui-ingestion-runner | INFO [ui-runner] Execution urn:li:dataHubExecutionRequest:... finished with status SUCCEEDED
+   ```
+
+3. Confirm automatic tokenization with `docker compose logs -f base64-action`.
+
+   ```text
+   base64-action      | INFO base64-action Action ready. Watching DataHub runs for platform='postgres' pipeline='urn:li:dataHubIngestionSource:0ce41f93-...'
+   base64-action      | INFO base64-action Processing 3 dataset(s) for run id scan-1700001234
+   base64-action      | INFO base64-action Encoding urn:li:dataset:(urn:li:dataPlatform:postgres,lseat.public.customers,PROD) => public.customers (text columns: first_name, email)
+   base64-action      | INFO base64-action Finished encoding urn:li:dataset:(...,orders,PROD) (120 rows)
+   ```
+
+4. Re-run the same source from the UI. Tokenization should skip unchanged tables instead of duplicating them.
+
+   ```text
+   ui-ingestion-runner | INFO [ui-runner] Detected pending execution urn:li:dataHubExecutionRequest:...
+   base64-action      | INFO base64-action No data change detected for urn:li:dataset:(...,customers,PROD); skipping
+   base64-action      | INFO base64-action No data change detected for urn:li:dataset:(...,orders,PROD); skipping
+   ```
+
+5. Verify the encoded schema from `psql`.
+
+   ```sql
+   \dn+ encoded
+   SELECT COUNT(*) FROM encoded.customers;
+   ```
+
+   ```text
+   encoded | datahub | ...
+   count
+   -------
+       120
+   ```
+
+Acceptance checks:
+- UI run shows **RUNNING → COMPLETED** with non-empty logs (no “No Output”).
+- `encoded` schema exists; table counts mirror source; TEXT/VARCHAR columns are Base64 values.
+- Re-running from UI does not duplicate rows (`base64-action` logs “No data change detected”).
+- `make ingest` continues to succeed for the CLI path.
 
 ## Step-by-Step: What Happens
 
@@ -77,10 +100,10 @@ make up
 
 Expected log highlights:
 ```text
-datahub-gms     | INFO  main DataHub GMS started on port 8080
-postgres        | LOG   database system is ready to accept connections
-base64-action   | INFO  Action ready. Watching DataHub runs for platform='postgres' pipeline='postgres_local_poc'.
-ui-ingestion-runner | [ui-runner] Starting poller against http://datahub-gms:8080 (interval=15s)
+datahub-gms        | INFO  main DataHub GMS started on port 8080
+postgres           | LOG   database system is ready to accept connections
+base64-action      | INFO  Action ready. Watching DataHub runs for platform='postgres' pipeline='postgres_local_poc'.
+ui-ingestion-runner | INFO [ui-runner] Starting poller against http://datahub-gms:8080 (interval=15s, executor=ui-ingestion-runner)
 ```
 
 ### Step 2 — Ingest metadata (`make ingest`)
@@ -152,6 +175,13 @@ sequenceDiagram
     "GMS Event"->>Action: Trigger (platform=postgres)
     Action->>"Postgres (encoded)": Write encoded.<table>
 ```
+
+## Troubleshooting Guide
+- **UI run stuck in PENDING / No Output**: verify UI ingestion is enabled (`UI_INGESTION_ENABLED=true` in `docker-compose.yml`) and the helper container can reach GMS. Run `docker compose logs -f ui-ingestion-runner` to confirm it prints “Starting poller …”.
+- **Database connection failures**: the runner rewrites `localhost`/`host.docker.internal` to the Docker service name automatically. If the source lives elsewhere, adjust `host_port` and confirm reachability with `docker compose exec ingestion nc -vz <host> <port>`.
+- **Tokenization not firing**: check `base64-action` logs for “Action ready …” followed by dataset summaries. Missing logs often mean the pipeline name or database name does not match the ingestion recipe; ensure the UI recipe’s values align with the Base64 overrides.
+- **Permission or auth errors**: the helper and action use the same credentials as the UI recipe. Update both the recipe and the `.env`/`docker-compose.yml` overrides if passwords change.
+- **Endpoint sanity checks**: `curl http://localhost:8080/health` validates GMS; `curl -XPOST http://localhost:8080/api/graphql -d '{"query":"{ health { status } }"}'` ensures GraphQL responds. Use `docker compose logs -f datahub-gms datahub-frontend` for deeper errors.
 
 ## Configuration You Might Change
 - `ingest/postgres_recipe.yml` — adjust `host_port`, credentials, schema filters, or pipeline name.
