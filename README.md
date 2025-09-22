@@ -16,6 +16,48 @@ It is meant for local experimentation only: no hardening, no production security
 - `make psql` — open a `psql` shell against the demo Postgres database
 - `make down` — stop and remove containers, networks, and volumes
 
+## Ingestion Runner quick start
+The dedicated ingestion runner container now waits for upstream dependencies before executing the DataHub CLI. This ensures the
+CLI is never asked to `sleep` and that ingestion logs begin with useful health-check context.
+
+1. Build the ingestion runner image (automatically handled by `make up`, but available standalone):
+
+   ```bash
+   docker compose build ingestion
+   ```
+
+2. Bring the stack online if it is not already running:
+
+   ```bash
+   make up
+   ```
+
+3. Launch the ingestion runner manually. The entrypoint will wait for the DataHub GMS health endpoint and the Postgres port
+   before invoking `datahub ingest -c /workspace/ingest/recipe.yml`:
+
+   ```bash
+   docker compose run --rm ingestion
+   ```
+
+   Sample output:
+
+   ```text
+   2024-07-01T00:00:00Z Starting ingestion runner
+   2024-07-01T00:00:00Z Using recipe file: /workspace/ingest/recipe.yml
+   2024-07-01T00:00:00Z Waiting for DataHub GMS health at http://datahub-gms:8080/api/health
+   2024-07-01T00:00:05Z DataHub GMS health check succeeded (attempt 1)
+   2024-07-01T00:00:05Z DataHub GMS health payload: {"status":"HEALTHY"}
+   2024-07-01T00:00:05Z Waiting for database availability at postgres:5432
+   2024-07-01T00:00:06Z Database connectivity check succeeded (attempt 1)
+   2024-07-01T00:00:06Z Health checks passed. Executing ingestion
+   ```
+
+4. Check the CLI output for `COMPLETED` to confirm success. The container exits with a non-zero status if any health check or the
+   ingestion run fails.
+
+5. Optional: Run `scripts/test_ingestion_runner.sh` to assert the CLI completes and logs were produced. The script wraps the same
+   container invocation and fails fast if the log output is empty.
+
 ## UI runner smoke test
 1. Build the shared runner/action image so both containers have the same Python environment:
 
@@ -29,7 +71,7 @@ It is meant for local experimentation only: no hardening, no production security
    make up
    ```
 
-3. In the DataHub UI go to **Ingestion → Sources → Add Source**, pick **Postgres**, select **Trigger Manually**, and paste the sample recipe from [`ingest/postgres_recipe.yml`](ingest/postgres_recipe.yml). When the job is submitted, the UI should show **PENDING → RUNNING → COMPLETED** and `docker compose logs -f ui-ingestion-runner` should include the connectivity check:
+3. In the DataHub UI go to **Ingestion → Sources → Add Source**, pick **Postgres**, select **Trigger Manually**, and paste the sample recipe from [`ingest/recipe.yml`](ingest/recipe.yml). When the job is submitted, the UI should show **PENDING → RUNNING → COMPLETED** and `docker compose logs -f ui-ingestion-runner` should include the connectivity check:
 
    ```text
    ui-ingestion-runner  | INFO [ui-runner] Running Postgres connectivity check against postgres:5432/postgres
@@ -46,7 +88,7 @@ It is meant for local experimentation only: no hardening, no production security
    The output should list tables under the `encoded` schema with non-zero row counts.
 
 ## Run from UI
-1. Launch `http://localhost:9002`, sign in (`datahub` / `datahub`), and add a **Postgres** source. Paste the provided recipe from the task description or reuse `ingest/postgres_recipe.yml`.
+1. Launch `http://localhost:9002`, sign in (`datahub` / `datahub`), and add a **Postgres** source. Paste the provided recipe from the task description or reuse `ingest/recipe.yml`.
 
    ```yaml
    pipeline_name: urn:li:dataHubIngestionSource:0ce41f93-2590-40e5-8f25-fbc7b2433170
@@ -136,7 +178,7 @@ ui-ingestion-runner | INFO [ui-runner] Starting poller against http://datahub-gm
 ```
 
 ### Step 2 — Ingest metadata (`make ingest`)
-Runs the recipe at `ingest/postgres_recipe.yml`, which points at `postgres:5432` with user `datahub/datahub` and filters `public.*`. The command executes inside the dedicated `ingestion` container.
+Runs the recipe at `ingest/recipe.yml`, which points at `postgres:5432` with user `datahub/datahub` and filters `public.*`. The command executes inside the dedicated `ingestion` container.
 
 ```bash
 make ingest
@@ -144,7 +186,7 @@ make ingest
 
 Expected log highlights:
 ```text
-ingestion-run   | INFO  Starting postgres ingest (ingest/postgres_recipe.yml)
+ingestion-run   | INFO  Starting postgres ingest (ingest/recipe.yml)
 ingestion-run   | INFO  Discovered tables: public.customers, public.orders, public.payments
 ingestion-run   | INFO  Emitted 3 MetadataChangeEvents to http://datahub-gms:8080
 ingestion-run   | INFO  Postgres ingestion completed successfully
@@ -213,7 +255,7 @@ sequenceDiagram
 - **Endpoint sanity checks**: `curl http://localhost:8080/health` validates GMS; `curl -XPOST http://localhost:8080/api/graphql -d '{"query":"{ health { status } }"}'` ensures GraphQL responds. Use `docker compose logs -f datahub-gms datahub-frontend` for deeper errors.
 
 ## Configuration You Might Change
-- `ingest/postgres_recipe.yml` — adjust `host_port`, credentials, schema filters, or pipeline name.
+- `ingest/recipe.yml` — adjust `host_port`, credentials, schema filters, or pipeline name.
 - `actions/base64_action/config.yml` — override `gms_url`, `platform`, `pipeline_name`, and the Postgres connection block; env vars with the same names take precedence.
 - `Makefile` (`PIPELINE_NAME`) — keep this in sync with the ingestion recipe if you change it so the action filter still matches.
 

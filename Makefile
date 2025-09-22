@@ -20,7 +20,7 @@ ingest:
 	    sleep 5; \
 	  done; \
 	  echo 'datahub-gms is healthy, starting ingestion'; \
-	  DATAHUB_GMS_URL=http://datahub-gms:8080 DATAHUB_GMS_HOST=datahub-gms DATAHUB_GMS_PORT=8080 DATAHUB_GMS_PROTOCOL=http datahub ingest run -c /ingest/postgres_recipe.yml"
+	  DATAHUB_GMS_URL=http://datahub-gms:8080 DATAHUB_GMS_HOST=datahub-gms DATAHUB_GMS_PORT=8080 DATAHUB_GMS_PROTOCOL=http datahub ingest run -c /workspace/ingest/recipe.yml"
 
 down:
 	$(DC) down -v
