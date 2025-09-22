@@ -1,4 +1,4 @@
-acryl-datahub==1.2.0.9
+acryl-datahub==1.2.0.1
 aiohappyeyeballs==2.6.1
 aiohttp==3.12.15
 aiosignal==1.4.0
@@ -12,7 +12,7 @@ charset-normalizer==3.4.3
 click==8.3.0
 click-default-group==1.2.4
 click-spinner==0.1.10
-datahub==0.999.1
+kafka-python==2.0.2
 Deprecated==1.2.18
 docker==7.1.0
 expandvars==1.1.2
