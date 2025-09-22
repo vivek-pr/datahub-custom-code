@@ -33,6 +33,26 @@ optimized for local experimentation—no production hardening or durability guar
 The UI-driven helper (`ui_ingestion_runner`) still polls DataHub for ingestion completions and now invokes the classifier
 automatically. Logs for both the classifier and encoder appear under `docker compose logs -f ui-ingestion-runner base64-action`.
 
+## Run ingestion from the UI
+1. Launch the stack with `make up` and wait for `datahub-gms`, `datahub-frontend`, `kafka-autoheal`, and `ui-ingestion-runner` to report healthy.
+2. Open [http://localhost:9002](http://localhost:9002) → Settings → Ingestion → **New source**.
+3. Choose the **Postgres** recipe, supply database connection details reachable from the Docker network (`postgres:5432` by default), and save.
+4. From the source details page click **Run** → **Trigger now**. Within ~15 seconds the run appears under **Runs** with status `RUNNING`.
+5. Tail logs with `docker compose logs -f ui-ingestion-runner datahub-gms base64-action`. You should see:
+   ```text
+   ui-ingestion-runner | INFO Detected pending execution urn:li:dataHubExecutionRequest:123...
+   ui-ingestion-runner | INFO Prepared recipe for ... (pipeline=ui-...)
+   ui-ingestion-runner | INFO Classifier + encoder finished for pipeline ui-... (tables processed=1)
+   base64-action       | INFO Encoding completed for 1 table(s) using explicit column overrides
+   ```
+6. When the run finishes, the UI run record transitions to **COMPLETED**. The Base64 action writes results into the `encoded.*` tables using either the UI-provided column list or the classifier output.
+
+Troubleshooting tips:
+- Ensure the UI runner resolves `datahub-gms` instead of `localhost`. Set `DATAHUB_GMS_URI=http://datahub-gms:8080` inside Docker or `http://localhost:8080` on the host. Include `DATAHUB_TOKEN`/`DATAHUB_ACTOR` if GMS enforces auth.
+- If the run stalls with `PENDING`, confirm the Kafka topics exist (`docker compose run --rm kafka-setup`) and that the `kafka-autoheal` job succeeds.
+- Permission errors indicate the runner's actor lacks `MANAGE_METADATA_INGESTION` or `MANAGE_SECRETS`. Grant them in DataHub or adjust the `DATAHUB_ACTOR` value.
+- Recipe connection issues almost always stem from `localhost` being unreachable from the container. Replace it with `postgres` or `host.docker.internal` depending on where Postgres lives.
+
 ## Runner health check
 - The UI ingestion runner now resolves the GMS endpoint with a sequence of lightweight probes. It will try `/api/health`, `/admin`,
   `/api/graphiql`, `/api/graphql` (GraphQL introspection), `/actuator/health`, and `/health` until one responds with HTTP 200. A

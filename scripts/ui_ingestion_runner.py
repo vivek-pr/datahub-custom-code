@@ -15,7 +15,7 @@ import random
 import sys
 import time
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
@@ -37,7 +37,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from actions.base64_action.action import RuntimeOverrides  # noqa: E402
+from actions.base64_action.action import (  # noqa: E402
+    Base64EncodeAction,
+    RuntimeOverrides,
+)
+from actions.base64_action.configuration import ActionConfig  # noqa: E402
 from scripts.run_classifier_and_encode import (  # noqa: E402
     run_once as run_classifier_and_encode,
 )
@@ -74,6 +78,87 @@ DEFAULT_HEALTH_PATHS: Tuple[str, ...] = (
 GRAPHQL_HEALTH_PATH = "/api/graphql"
 MAX_HEALTH_RETRIES = 8
 GRAPHQL_HEALTH_QUERY = """query __HealthCheck { __schema { queryType { name } } }"""
+
+
+def _safe_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_override_list(raw: Any) -> List[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        values = [raw]
+    elif isinstance(raw, (list, tuple, set)):
+        values = list(raw)
+    else:
+        LOGGER.debug("Unexpected schema allowlist type %s", type(raw).__name__)
+        return []
+    normalized: List[str] = []
+    for item in values:
+        if item is None:
+            continue
+        text = str(item).strip()
+        if not text:
+            continue
+        normalized.append(text)
+    return normalized
+
+
+def _parse_column_allowlist(raw: Any) -> Dict[Tuple[str, str], Set[str]]:
+    mapping: Dict[Tuple[str, str], Set[str]] = {}
+    if raw is None:
+        return mapping
+    if isinstance(raw, dict):
+        iterator = raw.items()
+    elif isinstance(raw, list):
+        iterator = []
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            schema = entry.get("schema") or entry.get("tableSchema")
+            table = entry.get("table") or entry.get("name")
+            if not schema or not table:
+                continue
+            iterator.append((f"{schema}.{table}", entry.get("columns")))
+    else:
+        LOGGER.debug("Unsupported column allowlist type %s", type(raw).__name__)
+        return mapping
+
+    for key, value in iterator:
+        if key is None or value is None:
+            continue
+        if isinstance(key, str) and "." in key:
+            schema, table = key.split(".", 1)
+        else:
+            LOGGER.debug("Column allowlist key %s missing schema separator", key)
+            continue
+        schema = schema.strip()
+        table = table.strip()
+        if not schema or not table:
+            continue
+        columns: List[str]
+        if isinstance(value, str):
+            columns = [value]
+        elif isinstance(value, (list, tuple, set)):
+            columns = [str(item) for item in value if item]
+        else:
+            LOGGER.debug(
+                "Skipping column allowlist entry for %s.%s due to invalid value type %s",
+                schema,
+                table,
+                type(value).__name__,
+            )
+            continue
+        normalized = {col.strip() for col in columns if str(col).strip()}
+        if normalized:
+            mapping[(schema, table)] = normalized
+    return mapping
 
 
 def _normalize_health_path(raw_path: str) -> Optional[str]:
@@ -182,6 +267,7 @@ class GraphQLClient:
     base_headers: Dict[str, str]
     max_retries: int = 5
 
+
     def query(
         self,
         query: str,
@@ -259,6 +345,80 @@ class GraphQLClient:
         except Exception:  # pylint: disable=broad-except
             return False
         return bool(data.get("__type"))
+
+
+@dataclass
+class TokenizationOverrides:
+    database_host: Optional[str] = None
+    database_port: Optional[int] = None
+    database_name: Optional[str] = None
+    database_user: Optional[str] = None
+    database_password: Optional[str] = None
+    schema_allowlist: List[str] = field(default_factory=list)
+    column_allowlist: Dict[Tuple[str, str], Set[str]] = field(default_factory=dict)
+
+    @classmethod
+    def from_argument(cls, raw_value: Optional[str | Dict[str, Any]]) -> "TokenizationOverrides":
+        if raw_value is None:
+            return cls()
+        payload: Any
+        if isinstance(raw_value, str):
+            try:
+                payload = json.loads(raw_value) if raw_value.strip() else {}
+            except json.JSONDecodeError as exc:  # pylint: disable=broad-except
+                LOGGER.warning(
+                    "Unable to parse tokenization overrides JSON: %s", exc
+                )
+                return cls()
+        elif isinstance(raw_value, dict):
+            payload = raw_value
+        else:
+            LOGGER.debug(
+                "Ignoring unsupported tokenization override value of type %s",
+                type(raw_value).__name__,
+            )
+            return cls()
+
+        overrides = cls()
+        database = payload.get("database") or payload.get("db") or {}
+        if isinstance(database, dict):
+            overrides.database_host = database.get("host") or database.get("hostname")
+            overrides.database_port = _safe_int(database.get("port"))
+            overrides.database_name = (
+                database.get("name")
+                or database.get("database")
+                or database.get("dbname")
+            )
+            overrides.database_user = database.get("user") or database.get("username")
+            overrides.database_password = (
+                database.get("password") or database.get("pass")
+            )
+
+        schema_allow = payload.get("schemaAllow") or payload.get("schema_allow")
+        if schema_allow is None:
+            schema_allow = payload.get("schema")
+        overrides.schema_allowlist = _normalize_override_list(schema_allow)
+
+        overrides.column_allowlist = _parse_column_allowlist(
+            payload.get("columnAllow")
+            or payload.get("column_allow")
+            or payload.get("columns")
+        )
+        return overrides
+
+    def apply_to_runtime(self, runtime: "RuntimeOverrides") -> None:
+        if self.database_host:
+            runtime.database_host = self.database_host
+        if self.database_port:
+            runtime.database_port = self.database_port
+        if self.database_name:
+            runtime.database_name = self.database_name
+        if self.database_user:
+            runtime.database_user = self.database_user
+        if self.database_password:
+            runtime.database_password = self.database_password
+        if self.schema_allowlist:
+            runtime.schema_allowlist = list(self.schema_allowlist)
 
 
 def build_base_headers() -> Dict[str, str]:
@@ -753,16 +913,19 @@ def list_pending_requests(client: GraphQLClient, source_urn: str) -> List[str]:
     for execution in executions:
         if not execution:
             continue
-        urn = execution.get("urn")
-        result = execution.get("result")
-        if urn and (not result or not result.get("status")):
+        urn = execution.get("urn") or execution.get("id")
+        if not urn:
+            continue
+        result = execution.get("result") or {}
+        status = result.get("status")
+        if not status or str(status).upper() == "PENDING":
             pending.append(urn)
     return pending
 
 
 def load_execution_recipe(
     client: GraphQLClient, execution_urn: str
-) -> tuple[Dict, Optional[str]]:
+) -> tuple[Dict, Optional[str], TokenizationOverrides]:
     query = """
     query GetExecution($urn: String!) {
       executionRequest(urn: $urn) {
@@ -785,6 +948,12 @@ def load_execution_recipe(
     if not raw_recipe:
         raise RuntimeError(f"Execution {execution_urn} missing recipe argument")
     recipe_dict = json.loads(raw_recipe)
+    overrides = TokenizationOverrides.from_argument(
+        arg_map.get("tokenizationConfig")
+        or arg_map.get("tokenization_config")
+        or arg_map.get("tokenizationOverrides")
+        or arg_map.get("tokenization_overrides")
+    )
     recipe_dict.setdefault(
         "sink",
         {
@@ -800,7 +969,7 @@ def load_execution_recipe(
             execution_urn,
             json.dumps(recipe_dict, indent=2),
         )
-    return recipe_dict, execution.get("requestedExecutorId")
+    return recipe_dict, execution.get("requestedExecutorId"), overrides
 
 
 def sanitize_host(recipe: Dict) -> Optional[Tuple[str, str]]:
@@ -860,7 +1029,7 @@ def prepare_recipe(recipe: Dict, execution_urn: str) -> Dict:
     return prepared
 
 
-def trigger_tokenization(recipe: Dict) -> None:
+def trigger_tokenization(recipe: Dict, overrides: TokenizationOverrides) -> None:
     source_config = recipe.get("source", {}).get("config", {})
     host, _, port = (source_config.get("host_port", ":").partition(":"))
     try:
@@ -868,8 +1037,9 @@ def trigger_tokenization(recipe: Dict) -> None:
     except ValueError:
         LOGGER.warning("Invalid port '%s' in recipe; skipping explicit port override", port)
         port_value = None
-    overrides = RuntimeOverrides(
+    runtime_overrides = RuntimeOverrides(
         pipeline_name=recipe.get("pipeline_name"),
+        platform=recipe.get("source", {}).get("type"),
         database_host=host or None,
         database_port=port_value,
         database_name=source_config.get("database"),
@@ -877,20 +1047,34 @@ def trigger_tokenization(recipe: Dict) -> None:
         database_password=source_config.get("password"),
         schema_allowlist=extract_schema_allowlist(recipe),
     )
+    overrides.apply_to_runtime(runtime_overrides)
     LOGGER.info(
         "Triggering PII classification for pipeline %s targeting database %s",
-        overrides.pipeline_name,
-        overrides.database_name,
+        runtime_overrides.pipeline_name,
+        runtime_overrides.database_name,
     )
+    if overrides.column_allowlist:
+        action_config = ActionConfig.load(overrides=runtime_overrides)
+        action = Base64EncodeAction(action_config)
+        try:
+            action.process_with_allowlist(overrides.column_allowlist)
+        finally:
+            action.conn.close()
+        LOGGER.info(
+            "Encoding completed for %d table(s) using explicit column overrides",
+            len(overrides.column_allowlist),
+        )
+        return
+
     allowlist = run_classifier_and_encode(
-        pipeline_name=overrides.pipeline_name,
-        platform=overrides.platform,
-        schema_allowlist=overrides.schema_allowlist,
-        overrides=overrides,
+        pipeline_name=runtime_overrides.pipeline_name,
+        platform=runtime_overrides.platform,
+        schema_allowlist=runtime_overrides.schema_allowlist,
+        overrides=runtime_overrides,
     )
     LOGGER.info(
         "Classifier + encoder finished for pipeline %s (tables processed=%d)",
-        overrides.pipeline_name,
+        runtime_overrides.pipeline_name,
         len(allowlist),
     )
 
@@ -947,7 +1131,12 @@ def verify_postgres_connection(recipe: Dict) -> None:
     )
 
 
-def run_ingestion(recipe: Dict, execution_urn: str, executor_id: str) -> int:
+def run_ingestion(
+    recipe: Dict,
+    execution_urn: str,
+    executor_id: str,
+    overrides: TokenizationOverrides,
+) -> int:
     prepared = prepare_recipe(recipe, execution_urn)
     try:
         verify_postgres_connection(prepared)
@@ -974,7 +1163,7 @@ def run_ingestion(recipe: Dict, execution_urn: str, executor_id: str) -> int:
     finally:
         pipeline.teardown()
     try:
-        trigger_tokenization(prepared)
+        trigger_tokenization(prepared, overrides)
     except Exception as exc:  # pylint: disable=broad-except
         LOGGER.exception(
             "Tokenization for %s failed after ingestion: %s", execution_urn, exc
@@ -1037,9 +1226,18 @@ def main() -> int:
                         execution_urn,
                         source.get("name", source_urn),
                     )
-                    recipe, requested_executor = load_execution_recipe(client, execution_urn)
+                    (
+                        recipe,
+                        requested_executor,
+                        token_overrides,
+                    ) = load_execution_recipe(client, execution_urn)
                     executor_id = requested_executor or DEFAULT_EXECUTOR_ID
-                    exit_code = run_ingestion(recipe, execution_urn, executor_id)
+                    exit_code = run_ingestion(
+                        recipe,
+                        execution_urn,
+                        executor_id,
+                        token_overrides,
+                    )
                     status = "SUCCEEDED" if exit_code == 0 else f"FAILED({exit_code})"
                     LOGGER.info(
                         "Execution %s finished with status %s",
