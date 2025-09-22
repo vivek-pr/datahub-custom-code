@@ -375,7 +375,7 @@ services:
     volumes:
       - ./scripts:/scripts:ro
     working_dir: /scripts
-    command: ["python", "-u", "ui_ingestion_runner.py"]
+    entrypoint: ["python", "-u", "ui_ingestion_runner.py"]
     restart: unless-stopped
 
 volumes:
