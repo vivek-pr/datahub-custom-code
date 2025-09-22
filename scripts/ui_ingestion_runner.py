@@ -1,23 +1,34 @@
-#!/usr/bin/env python3
 """Minimal ingestion executor for UI-triggered runs.
 
-Polls DataHub GraphQL for execution requests that do not yet have results and
-replays them using the standard `datahub ingest run` CLI. Meant for local PoC
-use only.
+Polls DataHub GraphQL for execution requests and replays them using the
+DataHub Python pipeline so that run status and logs are published back to GMS.
+After a successful ingestion the Base64 tokenization action is triggered.
 """
 
 from __future__ import annotations
 
+import copy
 import json
+import logging
 import os
-import subprocess
 import sys
-import tempfile
 import time
-from typing import Dict, Iterable, List, Optional, Sequence
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
-import yaml
+
+from datahub.ingestion.run.pipeline import Pipeline
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from actions.base64_action.action import (  # noqa: E402
+    ActionConfig,
+    Base64EncodeAction,
+    RuntimeOverrides,
+)
 
 GMS_URL = os.environ.get("DATAHUB_GMS_URL", "http://datahub-gms:8080").rstrip("/")
 POLL_SECONDS = int(os.environ.get("UI_RUNNER_POLL_INTERVAL", "15"))
@@ -25,6 +36,13 @@ PAGE_SIZE = int(os.environ.get("UI_RUNNER_PAGE_SIZE", "10"))
 DEFAULT_SINK_SERVER = os.environ.get("UI_RUNNER_SINK_SERVER", f"{GMS_URL}")
 DEFAULT_EXECUTOR_ID = os.environ.get("UI_RUNNER_EXECUTOR_ID", "ui-ingestion-runner")
 DEBUG = os.environ.get("UI_RUNNER_DEBUG", "0") == "1"
+LOG_LEVEL = os.environ.get("UI_RUNNER_LOG_LEVEL", "INFO").upper()
+
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format="%(asctime)s %(levelname)s [ui-runner] %(message)s",
+)
+LOGGER = logging.getLogger("ui-ingestion-runner")
 
 
 class GraphQLClient:
@@ -98,7 +116,6 @@ def list_pending_requests(client: GraphQLClient, source_urn: str) -> List[str]:
             continue
         urn = execution.get("urn")
         result = execution.get("result")
-        # A null result means RUNNING/PENDING. We only handle runs with no result yet.
         if urn and (not result or not result.get("status")):
             pending.append(urn)
     return pending
@@ -129,7 +146,6 @@ def load_execution_recipe(
     if not raw_recipe:
         raise RuntimeError(f"Execution {execution_urn} missing recipe argument")
     recipe_dict = json.loads(raw_recipe)
-    # Ensure a sink is present so CLI emits to our local GMS.
     recipe_dict.setdefault(
         "sink",
         {
@@ -140,58 +156,138 @@ def load_execution_recipe(
         },
     )
     if DEBUG:
-        print(
-            f"Loaded recipe for {execution_urn}: {json.dumps(recipe_dict, indent=2)}",
-            file=sys.stderr,
+        LOGGER.debug(
+            "Loaded recipe for %s: %s",
+            execution_urn,
+            json.dumps(recipe_dict, indent=2),
         )
     return recipe_dict, execution.get("requestedExecutorId")
 
 
-def run_ingestion(recipe: Dict, execution_urn: str, executor_id: str) -> int:
-    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as temp_recipe:
-        yaml.safe_dump(recipe, temp_recipe)
-        temp_path = temp_recipe.name
+def sanitize_host(recipe: Dict) -> Optional[Tuple[str, str]]:
+    source_config = recipe.get("source", {}).get("config", {})
+    host_port = source_config.get("host_port")
+    if not host_port:
+        return None
+    host, sep, port = host_port.partition(":")
+    if not sep:
+        port = ""
+    fallback_host = os.environ.get("UI_RUNNER_DEFAULT_DB_HOST", "postgres")
+    normalized = host.strip().lower()
+    if normalized in {"localhost", "127.0.0.1", "0.0.0.0", "host.docker.internal"}:
+        new_host = fallback_host
+    else:
+        new_host = host
+    new_port = port or os.environ.get("UI_RUNNER_DEFAULT_DB_PORT", "5432")
+    rewritten = f"{new_host}:{new_port}"
+    if rewritten != host_port:
+        source_config["host_port"] = rewritten
+        LOGGER.info(
+            "Rewriting source host_port from %s to %s for container accessibility",
+            host_port,
+            rewritten,
+        )
+        return host_port, rewritten
+    return None
+
+
+def extract_schema_allowlist(recipe: Dict) -> List[str]:
+    source_config = recipe.get("source", {}).get("config", {})
+    schema_section = source_config.get("schema_pattern")
+    if isinstance(schema_section, dict):
+        candidates = schema_section.get("allow") or []
+    else:
+        candidates = schema_section or []
+    if isinstance(candidates, str):
+        candidates = [candidates]
+    return [str(value).strip() for value in candidates if str(value).strip()]
+
+
+def prepare_recipe(recipe: Dict, execution_urn: str) -> Dict:
+    prepared = copy.deepcopy(recipe)
+    sanitize_host(prepared)
+    run_id = execution_urn.split(":")[-1]
+    prepared["run_id"] = run_id
+    if not prepared.get("pipeline_name"):
+        prepared["pipeline_name"] = recipe.get("pipeline_name") or f"ui-{run_id}"
+    prepared.setdefault("reporting", [])
+    sink_config = prepared.setdefault("sink", {}).setdefault("config", {})
+    sink_config.setdefault("server", DEFAULT_SINK_SERVER)
+    LOGGER.info(
+        "Prepared recipe for %s (pipeline=%s)",
+        execution_urn,
+        prepared.get("pipeline_name"),
+    )
+    return prepared
+
+
+def trigger_tokenization(recipe: Dict) -> None:
+    source_config = recipe.get("source", {}).get("config", {})
+    host, _, port = (source_config.get("host_port", ":").partition(":"))
     try:
-        print(
-            f"[ui-runner] Running ingestion recipe {temp_path}"
-            f" for execution {execution_urn} (executor={executor_id})",
-            flush=True,
-        )
-        command = [
-            "datahub",
-            "ingest",
-            "run",
-            "--executor-id",
-            executor_id,
-            "--execution-request-urn",
-            execution_urn,
-            "-c",
-            temp_path,
-        ]
-        completed = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if completed.stdout:
-            print(completed.stdout, end="", flush=True)
-        if completed.stderr:
-            print(completed.stderr, end="", file=sys.stderr, flush=True)
-        return completed.returncode
+        port_value = int(port) if port else None
+    except ValueError:
+        LOGGER.warning("Invalid port '%s' in recipe; skipping explicit port override", port)
+        port_value = None
+    overrides = RuntimeOverrides(
+        pipeline_name=recipe.get("pipeline_name"),
+        database_host=host or None,
+        database_port=port_value,
+        database_name=source_config.get("database"),
+        database_user=source_config.get("username"),
+        database_password=source_config.get("password"),
+        schema_allowlist=extract_schema_allowlist(recipe),
+    )
+    LOGGER.info(
+        "Triggering Base64 tokenization for pipeline %s targeting database %s",
+        overrides.pipeline_name,
+        overrides.database_name,
+    )
+    action_config = ActionConfig.load(overrides=overrides)
+    action = Base64EncodeAction(action_config)
+    try:
+        action.process_once()
     finally:
-        try:
-            os.unlink(temp_path)
-        except OSError:
-            pass
+        action.conn.close()
+    LOGGER.info("Tokenization for pipeline %s finished", overrides.pipeline_name)
+
+
+def run_ingestion(recipe: Dict, execution_urn: str, executor_id: str) -> int:
+    prepared = prepare_recipe(recipe, execution_urn)
+    LOGGER.info(
+        "Starting ingestion for %s using executor %s (pipeline=%s)",
+        execution_urn,
+        executor_id,
+        prepared.get("pipeline_name"),
+    )
+    pipeline = Pipeline.create(prepared, report_to="datahub", no_progress=True)
+    try:
+        pipeline.run()
+        pipeline.raise_from_status()
+    except Exception as exc:  # pylint: disable=broad-except
+        LOGGER.exception("Ingestion for %s failed: %s", execution_urn, exc)
+        return 1
+    finally:
+        pipeline.teardown()
+    try:
+        trigger_tokenization(prepared)
+    except Exception as exc:  # pylint: disable=broad-except
+        LOGGER.exception(
+            "Tokenization for %s failed after ingestion: %s", execution_urn, exc
+        )
+        return 2
+    LOGGER.info("Ingestion and tokenization for %s completed successfully", execution_urn)
+    return 0
 
 
 def main() -> int:
     client = GraphQLClient(f"{GMS_URL}/api/graphql")
     handled: set[str] = set()
-    print(
-        f"[ui-runner] Starting poller against {GMS_URL} (interval={POLL_SECONDS}s)",
-        flush=True,
+    LOGGER.info(
+        "Starting poller against %s (interval=%ss, executor=%s)",
+        GMS_URL,
+        POLL_SECONDS,
+        DEFAULT_EXECUTOR_ID,
     )
     while True:
         try:
@@ -202,22 +298,23 @@ def main() -> int:
                 for execution_urn in list_pending_requests(client, source_urn):
                     if execution_urn in handled:
                         continue
-                    print(
-                        f"[ui-runner] Detected pending execution {execution_urn}"
-                        f" for source {source.get('name', source_urn)}",
-                        flush=True,
+                    LOGGER.info(
+                        "Detected pending execution %s for source %s",
+                        execution_urn,
+                        source.get("name", source_urn),
                     )
                     recipe, requested_executor = load_execution_recipe(client, execution_urn)
                     executor_id = requested_executor or DEFAULT_EXECUTOR_ID
                     exit_code = run_ingestion(recipe, execution_urn, executor_id)
                     status = "SUCCEEDED" if exit_code == 0 else f"FAILED({exit_code})"
-                    print(
-                        f"[ui-runner] Execution {execution_urn} finished with status {status}",
-                        flush=True,
+                    LOGGER.info(
+                        "Execution %s finished with status %s",
+                        execution_urn,
+                        status,
                     )
                     handled.add(execution_urn)
         except Exception as exc:  # pylint: disable=broad-except
-            print(f"[ui-runner] Error while processing executions: {exc}", file=sys.stderr)
+            LOGGER.exception("Error while processing executions: %s", exc)
         time.sleep(POLL_SECONDS)
 
 

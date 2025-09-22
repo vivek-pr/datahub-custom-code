@@ -1,11 +1,12 @@
 import argparse
+import fnmatch
 import json
 import logging
 import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import psycopg
 import yaml
@@ -15,7 +16,10 @@ from tenacity import retry, stop_after_attempt, wait_fixed
 from datahub.ingestion.graph.client import DataHubGraph, DatahubClientConfig
 from datahub.metadata.schema_classes import SchemaFieldClass, SchemaMetadataClass, StringTypeClass
 
-logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(message)s",
+)
 LOGGER = logging.getLogger("base64-action")
 
 DEFAULT_CONFIG_PATH = Path(__file__).with_name("config.yml")
@@ -33,13 +37,32 @@ class DatabaseConfig:
     def from_dict(cls, raw: Optional[Dict]) -> "DatabaseConfig":
         if not raw:
             return cls()
+        host = raw.get("host")
+        port = raw.get("port")
+        host_port = raw.get("host_port")
+        if host_port and (":" in host_port):
+            host_candidate, port_candidate = host_port.split(":", 1)
+            host = host or host_candidate
+            port = port or port_candidate
         return cls(
-            host=raw.get("host", cls.host),
-            port=int(raw.get("port", cls.port)),
+            host=host or cls.host,
+            port=int(port or cls.port),
             dbname=raw.get("dbname", cls.dbname),
             user=raw.get("user", cls.user),
             password=raw.get("password", cls.password),
         )
+
+    def apply_overrides(self, overrides: "RuntimeOverrides") -> None:
+        if overrides.database_host:
+            self.host = overrides.database_host
+        if overrides.database_port:
+            self.port = overrides.database_port
+        if overrides.database_name:
+            self.dbname = overrides.database_name
+        if overrides.database_user:
+            self.user = overrides.database_user
+        if overrides.database_password:
+            self.password = overrides.database_password
 
 
 @dataclass
@@ -50,9 +73,25 @@ class ActionConfig:
     poll_interval_seconds: int = 15
     page_size: int = 100
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
+    schema_allowlist: List[str] = field(default_factory=list)
+
+    def apply_overrides(self, overrides: Optional["RuntimeOverrides"]) -> None:
+        if not overrides:
+            return
+        if overrides.gms_url:
+            self.gms_url = overrides.gms_url
+        if overrides.platform:
+            self.platform = overrides.platform
+        if overrides.pipeline_name:
+            self.pipeline_name = overrides.pipeline_name
+        self.database.apply_overrides(overrides)
+        if overrides.schema_allowlist is not None:
+            self.schema_allowlist = _normalize_allowlist(overrides.schema_allowlist)
 
     @classmethod
-    def load(cls, path: Path = DEFAULT_CONFIG_PATH) -> "ActionConfig":
+    def load(
+        cls, path: Path = DEFAULT_CONFIG_PATH, overrides: Optional["RuntimeOverrides"] = None
+    ) -> "ActionConfig":
         config = cls()
         raw: Dict = {}
         if path.exists():
@@ -69,6 +108,15 @@ class ActionConfig:
             )
             config.page_size = int(raw.get("page_size", config.page_size))
             config.database = DatabaseConfig.from_dict(raw.get("database"))
+            schema_raw: Optional[Iterable[Any]]
+            schema_raw = raw.get("schema_allowlist")
+            if not schema_raw:
+                pattern_section = raw.get("schema_pattern")
+                if isinstance(pattern_section, dict):
+                    schema_raw = pattern_section.get("allow")
+                else:
+                    schema_raw = pattern_section
+            config.schema_allowlist = _normalize_allowlist(schema_raw)
 
         # Environment overrides take precedence.
         config.gms_url = os.environ.get("DATAHUB_GMS_URL", config.gms_url)
@@ -78,6 +126,11 @@ class ActionConfig:
             os.environ.get("DATAHUB_RUN_POLL_INTERVAL", config.poll_interval_seconds)
         )
         config.page_size = int(os.environ.get("DATAHUB_RUN_PAGE_SIZE", config.page_size))
+        allow_env = os.environ.get("DATAHUB_SCHEMA_ALLOW") or os.environ.get(
+            "BASE64_SCHEMA_ALLOW"
+        )
+        if allow_env:
+            config.schema_allowlist = _normalize_allowlist(allow_env.split(","))
         config.database = DatabaseConfig(
             host=os.environ.get("POSTGRES_HOST", config.database.host),
             port=int(os.environ.get("POSTGRES_PORT", config.database.port)),
@@ -85,7 +138,48 @@ class ActionConfig:
             user=os.environ.get("POSTGRES_USER", config.database.user),
             password=os.environ.get("POSTGRES_PASSWORD", config.database.password),
         )
+        overrides = overrides or RuntimeOverrides()
+        config.apply_overrides(overrides)
         return config
+
+
+@dataclass
+class RuntimeOverrides:
+    gms_url: Optional[str] = None
+    platform: Optional[str] = None
+    pipeline_name: Optional[str] = None
+    database_host: Optional[str] = None
+    database_port: Optional[int] = None
+    database_name: Optional[str] = None
+    database_user: Optional[str] = None
+    database_password: Optional[str] = None
+    schema_allowlist: Optional[Sequence[str]] = None
+
+
+@dataclass
+class DatasetIdentifier:
+    urn: str
+    database: str
+    schema: str
+    table: str
+
+    @property
+    def schema_table(self) -> str:
+        return f"{self.schema}.{self.table}"
+
+
+def _normalize_allowlist(raw_values: Optional[Iterable[Any]]) -> List[str]:
+    if not raw_values:
+        return []
+    normalized: List[str] = []
+    for value in raw_values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        normalized.append(text.lower())
+    return normalized
 
 
 class Base64EncodeAction:
@@ -104,9 +198,11 @@ class Base64EncodeAction:
 
     def run(self) -> None:
         LOGGER.info(
-            "Action ready. Watching DataHub runs for platform='%s' pipeline='%s'.",
+            "Action ready. Watching DataHub runs for platform='%s' pipeline='%s' (database=%s, allowlist=%s).",
             self.config.platform,
             self.config.pipeline_name,
+            self.config.database.dbname,
+            ", ".join(self.config.schema_allowlist) or "<all>",
         )
         while True:
             try:
@@ -118,9 +214,11 @@ class Base64EncodeAction:
     def process_once(self) -> None:
         """Process the currently discovered datasets a single time."""
         LOGGER.info(
-            "Processing datasets once for platform='%s' pipeline='%s'.",
+            "Processing datasets once for platform='%s' pipeline='%s' (database=%s, allowlist=%s).",
             self.config.platform,
             self.config.pipeline_name,
+            self.config.database.dbname,
+            ", ".join(self.config.schema_allowlist) or "<all>",
         )
         self._process_pending_runs()
         LOGGER.info("One-time processing complete.")
@@ -132,6 +230,8 @@ class Base64EncodeAction:
                 """
                 CREATE TABLE IF NOT EXISTS encoded._action_audit (
                     dataset_urn TEXT PRIMARY KEY,
+                    ingestion_source_urn TEXT,
+                    database_name TEXT,
                     table_schema TEXT NOT NULL,
                     table_name TEXT NOT NULL,
                     last_run_id TEXT,
@@ -140,6 +240,12 @@ class Base64EncodeAction:
                     last_processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
                 """
+            )
+            cur.execute(
+                "ALTER TABLE encoded._action_audit ADD COLUMN IF NOT EXISTS ingestion_source_urn TEXT"
+            )
+            cur.execute(
+                "ALTER TABLE encoded._action_audit ADD COLUMN IF NOT EXISTS database_name TEXT"
             )
         self.conn.commit()
 
@@ -194,11 +300,19 @@ class Base64EncodeAction:
         return urns
 
     def _process_dataset(self, dataset_urn: str, run_id: str) -> None:
-        parsed = self._parse_dataset_urn(dataset_urn)
-        if not parsed:
+        identifier = self._parse_dataset_urn(dataset_urn)
+        if not identifier:
             LOGGER.warning("Could not parse dataset URN %s", dataset_urn)
             return
-        schema_name, table_name = parsed
+        if not self._dataset_matches_filters(identifier):
+            LOGGER.debug(
+                "Skipping dataset %s because it does not match filters (database=%s, allowlist=%s)",
+                dataset_urn,
+                self.config.database.dbname,
+                ", ".join(self.config.schema_allowlist) or "<all>",
+            )
+            return
+        schema_name, table_name = identifier.schema, identifier.table
         schema_metadata = self._get_schema_metadata(dataset_urn)
         if not schema_metadata:
             LOGGER.warning("No schema metadata available for %s", dataset_urn)
@@ -231,12 +345,28 @@ class Base64EncodeAction:
             return
 
         self._apply_encoding(schema_name, table_name, ordered_columns, text_columns)
-        self._record_dataset_state(dataset_urn, schema_name, table_name, run_id, checksum, row_count)
+        self._record_dataset_state(
+            dataset_urn,
+            identifier,
+            run_id,
+            checksum,
+            row_count,
+        )
         LOGGER.info(
             "Finished encoding %s (%d rows)",
             dataset_urn,
             row_count,
         )
+
+    def _dataset_matches_filters(self, identifier: DatasetIdentifier) -> bool:
+        database_filter = (self.config.database.dbname or "").lower()
+        if database_filter and identifier.database.lower() != database_filter:
+            return False
+        if self.config.schema_allowlist:
+            schema_table = identifier.schema_table.lower()
+            if not any(fnmatch.fnmatch(schema_table, pattern) for pattern in self.config.schema_allowlist):
+                return False
+        return True
 
     def _should_skip_dataset(self, dataset_urn: str, checksum: str, row_count: int) -> bool:
         with self.conn.cursor() as cur:
@@ -253,8 +383,7 @@ class Base64EncodeAction:
     def _record_dataset_state(
         self,
         dataset_urn: str,
-        schema_name: str,
-        table_name: str,
+        identifier: DatasetIdentifier,
         run_id: str,
         checksum: str,
         row_count: int,
@@ -262,8 +391,18 @@ class Base64EncodeAction:
         with self.conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO encoded._action_audit (dataset_urn, table_schema, table_name, last_run_id, row_count, checksum, last_processed_at)
-                VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                INSERT INTO encoded._action_audit (
+                    dataset_urn,
+                    ingestion_source_urn,
+                    database_name,
+                    table_schema,
+                    table_name,
+                    last_run_id,
+                    row_count,
+                    checksum,
+                    last_processed_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
                 ON CONFLICT (dataset_urn)
                 DO UPDATE SET
                     last_run_id = EXCLUDED.last_run_id,
@@ -271,7 +410,16 @@ class Base64EncodeAction:
                     checksum = EXCLUDED.checksum,
                     last_processed_at = NOW()
                 """,
-                (dataset_urn, schema_name, table_name, run_id, row_count, checksum),
+                (
+                    dataset_urn,
+                    self.config.pipeline_name,
+                    identifier.database,
+                    identifier.schema,
+                    identifier.table,
+                    run_id,
+                    row_count,
+                    checksum,
+                ),
             )
         self.conn.commit()
 
@@ -407,7 +555,7 @@ class Base64EncodeAction:
         return candidate.strip('"')
 
     @staticmethod
-    def _parse_dataset_urn(dataset_urn: str) -> Optional[Tuple[str, str]]:
+    def _parse_dataset_urn(dataset_urn: str) -> Optional[DatasetIdentifier]:
         try:
             inner = dataset_urn.split("(", 1)[1].rstrip(")")
             parts = inner.split(",")
@@ -417,9 +565,10 @@ class Base64EncodeAction:
             name_parts = dataset_name.split(".")
             if len(name_parts) < 2:
                 return None
+            database_name = name_parts[0]
             schema_name = name_parts[-2]
             table_name = name_parts[-1]
-            return schema_name, table_name
+            return DatasetIdentifier(dataset_urn, database_name, schema_name, table_name)
         except Exception:  # pylint: disable=broad-except
             return None
 
@@ -433,7 +582,8 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    action_config = ActionConfig.load()
+    overrides = RuntimeOverrides()
+    action_config = ActionConfig.load(overrides=overrides)
     LOGGER.info(
         "Loaded action config (gms_url=%s, platform=%s, pipeline_name=%s)",
         action_config.gms_url,
