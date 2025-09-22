@@ -1,5 +1,10 @@
 version: "3.9"
 
+x-runner-image: &runner-image
+  build:
+    context: .
+    dockerfile: docker/ui-runner/Dockerfile
+
 services:
   zookeeper:
     image: bitnami/zookeeper:3.9.2
@@ -336,7 +341,7 @@ services:
     restart: unless-stopped
 
   base64-action:
-    image: python:3.11-slim
+    <<: *runner-image
     depends_on:
       datahub-gms:
         condition: service_healthy
@@ -353,14 +358,15 @@ services:
       - POSTGRES_DB=postgres
       - POSTGRES_USER=datahub
       - POSTGRES_PASSWORD=datahub
+      - PYTHONPATH=/workspace
     volumes:
-      - ./actions/base64_action:/app
-    working_dir: /app
-    command: /bin/bash -lc "set -euo pipefail; python -m pip install --no-cache-dir -r requirements.txt; python -u action.py"
+      - ./:/workspace
+    working_dir: /workspace
+    command: ["python", "-u", "-m", "actions.base64_action.action"]
     restart: unless-stopped
 
   ui-ingestion-runner:
-    image: acryldata/datahub-ingestion:v1.2.0.1
+    <<: *runner-image
     depends_on:
       datahub-gms:
         condition: service_healthy
@@ -372,11 +378,11 @@ services:
       - DATAHUB_GMS_HOST=datahub-gms
       - DATAHUB_GMS_PORT=8080
       - UI_RUNNER_POLL_INTERVAL=15
+      - PYTHONPATH=/workspace
     volumes:
-      - ./scripts:/scripts:ro
-      - ./actions:/actions:ro
-    working_dir: /scripts
-    entrypoint: ["python", "-u", "ui_ingestion_runner.py"]
+      - ./:/workspace
+    working_dir: /workspace
+    command: ["python", "-u", "scripts/ui_ingestion_runner.py"]
     restart: unless-stopped
 
 volumes:

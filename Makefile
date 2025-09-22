@@ -1,10 +1,14 @@
 DC ?= docker compose
 PIPELINE_NAME ?= postgres_local_poc
 
-.PHONY: up ingest down logs psql
+.PHONY: up ingest down logs psql runner-image
+
+runner-image:
+	$(DC) build base64-action ui-ingestion-runner
 
 up: RUN_ID := $(shell date +%s)
 up:
+	$(MAKE) runner-image
 	$(DC) up -d --remove-orphans
 	$(MAKE) ingest RUN_ID=$(RUN_ID)
 
