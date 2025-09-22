@@ -98,14 +98,14 @@ Troubleshooting tips:
 - GitHub Actions workflow [`ci.yml`](.github/workflows/ci.yml) builds the helper images, starts the stack via `docker compose`,
   runs ingestion, executes the classifier + encoder, and finishes with the full pytest suite.
 
-## Kafka setup & health
-- **Bootstrap topics and schemas** once the stack is up:
+## Kafka bootstrap
+- **Create/verify topics** once the stack is up:
   ```bash
   docker compose run --rm kafka-setup
   ```
-  The job is idempotent. It creates all required DataHub topics with a single partition/replica and registers the matching Avro
-  schemas with Schema Registry.
-- **Auto-heal check** (re)runs the same logic and fails fast if a topic or subject disappears:
+  The container exits with `0` after listing the broker version, reporting existing topics, and creating any missing ones. Look
+  for logs such as `Kafka topic bootstrap complete. Topics ready: ...`.
+- **Idempotent auto-heal** reuses the same script so you can double-check readiness later:
   ```bash
   docker compose run --rm kafka-autoheal
   ```
@@ -116,12 +116,14 @@ Troubleshooting tips:
   ```
   Expected topics: `MetadataChangeEvent_v4`, `FailedMetadataChangeEvent_v4`, `MetadataAuditEvent_v4`,
   `FailedMetadataAuditEvent_v4`, `DataHubUsageEvent_v1`, `PlatformEvent_v1`.
+- **Configuration knobs** (all optional; defaults shown): `KAFKA_BOOTSTRAP_SERVERS=kafka:9092`, `PARTITIONS=1`,
+  `REPLICATION_FACTOR=1`, `API_VERSION=2.5.0`, `EXTRA_TOPICS=`.
 - **Tail consumer logs** if ingestion ever stalls:
   ```bash
   docker compose logs -f datahub-gms datahub-mce-consumer datahub-mae-consumer | grep -i unknown_topic || true
   ```
-- **Common fixes**: double-check that containers can resolve `kafka` and `schema-registry`; expose ports `9092` and `8081` if you
-  connect from your host; keep `replication.factor=1` for the single-broker PoC (bumping it requires a multi-broker cluster).
+- **Common fixes**: double-check that containers resolve `kafka`; expose port `9092` if you connect from the host; keep
+  `replication.factor=1` for the single-broker PoC (bumping it requires a multi-broker cluster).
 
 ## Tweaking the classifier quickly
 1. Edit `classifier/patterns.yml` to add or adjust regexes.
