@@ -33,6 +33,22 @@ optimized for local experimentation—no production hardening or durability guar
 The UI-driven helper (`ui_ingestion_runner`) still polls DataHub for ingestion completions and now invokes the classifier
 automatically. Logs for both the classifier and encoder appear under `docker compose logs -f ui-ingestion-runner base64-action`.
 
+## Runner health check
+- The UI ingestion runner now resolves the GMS endpoint with a sequence of lightweight probes. It will try `/api/health`, `/admin`,
+  `/api/graphiql`, `/api/graphql` (GraphQL introspection), `/actuator/health`, and `/health` until one responds with HTTP 200. A
+  successful GraphQL introspection is always required so that UI-triggered runs can proceed without false negatives.
+- Override the defaults by exporting values (or updating [`.env.example`](.env.example)):
+  ```bash
+  DATAHUB_GMS_URI=http://datahub-gms:8080      # inside Docker Compose
+  DATAHUB_GMS_URI=http://localhost:8080        # runner on your host machine
+  DATAHUB_TOKEN=your_personal_access_token     # optional bearer token
+  DATAHUB_ACTOR=urn:li:corpuser:alice          # defaults to ui_ingestion_runner
+  HEALTH_CHECK_PATHS=/admin,/api/graphiql,/api/graphql,/actuator/health,/health
+  ```
+- When the runner starts it logs the resolved URI, each probe attempt (status code + first 200 response characters), and the
+  endpoint that ultimately proved readiness. If every fallback fails the logs list all attempted URLs so you can diagnose which
+  path (or authentication header) needs to be adjusted.
+
 ## PII Classifier & Trigger
 - **Flow**: ingestion completes → classifier pulls tables from DataHub → regex rules mark PII → Base64 encoder rewrites flagged
   columns into `encoded.<table>` with idempotent inserts.
