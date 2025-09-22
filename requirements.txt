@@ -31,8 +31,8 @@ progressbar2==4.5.0
 propcache==0.3.2
 psutil==7.1.0
 psycopg[binary]==3.2.10
-pydantic==2.11.9
-pydantic_core==2.33.2
+pydantic>=2.11.0
+pydantic_core>=2.33.2
 python-dateutil==2.9.0.post0
 python-utils==3.9.1
 PyYAML==6.0.2

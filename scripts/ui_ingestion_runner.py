@@ -14,12 +14,22 @@ import os
 import random
 import sys
 import time
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import psycopg
 import requests
+from pydantic import ConfigDict
+from pydantic.warnings import PydanticDeprecatedSince20
+
+warnings.filterwarnings(
+    "ignore",
+    message="Valid config keys have changed in V2:",
+    category=UserWarning,
+)
+warnings.filterwarnings("ignore", category=PydanticDeprecatedSince20)
 
 from datahub.ingestion.run.pipeline import Pipeline
 
@@ -37,6 +47,7 @@ GMS_URL_ENV = (os.environ.get("DATAHUB_GMS_URI") or os.environ.get("DATAHUB_GMS_
 GMS_URL = (GMS_URL_ENV or "http://datahub-gms:8080").rstrip("/")
 DATAHUB_TOKEN = os.environ.get("DATAHUB_TOKEN")
 DATAHUB_ACTOR = os.environ.get("DATAHUB_ACTOR", DEFAULT_ACTOR)
+HEALTH_CHECK_PATHS_ENV = os.environ.get("HEALTH_CHECK_PATHS")
 POLL_SECONDS = int(os.environ.get("UI_RUNNER_POLL_INTERVAL", "15"))
 PAGE_SIZE = int(os.environ.get("UI_RUNNER_PAGE_SIZE", "10"))
 DEFAULT_SINK_SERVER = os.environ.get("UI_RUNNER_SINK_SERVER", f"{GMS_URL}")
@@ -52,6 +63,69 @@ LOGGER = logging.getLogger("ui-ingestion-runner")
 
 
 SENSITIVE_KEYS = {"password", "secret", "token", "apikey", "api_key", "auth"}
+DEFAULT_HEALTH_PATHS: Tuple[str, ...] = (
+    "/api/health",
+    "/admin",
+    "/api/graphiql",
+    "/api/graphql",
+    "/actuator/health",
+    "/health",
+)
+GRAPHQL_HEALTH_PATH = "/api/graphql"
+MAX_HEALTH_RETRIES = 8
+GRAPHQL_HEALTH_QUERY = """query __HealthCheck { __schema { queryType { name } } }"""
+
+
+def _normalize_health_path(raw_path: str) -> Optional[str]:
+    path = raw_path.strip()
+    if not path:
+        return None
+    if not path.startswith("/"):
+        path = f"/{path}"
+    if len(path) > 1 and path.endswith("/"):
+        path = path.rstrip("/")
+    return path
+
+
+def _parse_health_check_paths(raw: Optional[str]) -> List[str]:
+    if raw:
+        candidates = [_normalize_health_path(part) for part in raw.split(",")]
+        paths = [path for path in candidates if path]
+    else:
+        paths = list(DEFAULT_HEALTH_PATHS)
+    # Always try the GraphQL endpoint to verify backend readiness.
+    normalized = []
+    seen: Set[str] = set()
+    for path in paths:
+        if not path or path in seen:
+            continue
+        normalized.append(path)
+        seen.add(path)
+    if GRAPHQL_HEALTH_PATH not in seen:
+        normalized.append(GRAPHQL_HEALTH_PATH)
+    return normalized
+
+
+HEALTH_CHECK_PATHS = _parse_health_check_paths(HEALTH_CHECK_PATHS_ENV)
+
+
+def _patch_pydantic_defaults() -> None:
+    try:
+        from datahub.configuration.common import ConfigModel  # pylint: disable=import-outside-toplevel
+    except Exception as exc:  # pylint: disable=broad-except
+        logging.getLogger("ui-ingestion-runner").debug(
+            "Unable to adjust DataHub ConfigModel defaults: %s", exc
+        )
+        return
+
+    config_values = dict(getattr(ConfigModel, "model_config", {}) or {})
+    if "allow_population_by_field_name" in config_values:
+        config_values.pop("allow_population_by_field_name", None)
+    config_values.setdefault("validate_by_name", True)
+    ConfigModel.model_config = ConfigDict(**config_values)
+
+
+_patch_pydantic_defaults()
 
 
 class AuthenticationRequiredError(RuntimeError):
@@ -194,30 +268,180 @@ def build_base_headers() -> Dict[str, str]:
     return headers
 
 
-def validate_endpoint(
+def _format_probe_summary(
+    url: str, response: Optional[requests.Response], error: Optional[str]
+) -> str:
+    if response is not None:
+        preview = (response.text or "")[:200].strip()
+        if preview:
+            return f"{url} -> {response.status_code} ({preview})"
+        return f"{url} -> {response.status_code}"
+    if error:
+        return f"{url} -> error: {error}"
+    return f"{url} -> no response"
+
+
+def _probe_with_retries(
+    session: requests.Session,
+    method: str,
+    url: str,
+    headers: Dict[str, str],
+    json_payload: Optional[Dict[str, Any]] = None,
+) -> Tuple[Optional[requests.Response], Optional[str]]:
+    last_response: Optional[requests.Response] = None
+    last_error: Optional[str] = None
+    method_upper = method.upper()
+    for attempt in range(1, MAX_HEALTH_RETRIES + 1):
+        try:
+            response = session.request(
+                method_upper,
+                url,
+                headers=headers,
+                timeout=10,
+                json=json_payload,
+            )
+        except requests.RequestException as exc:  # pylint: disable=broad-except
+            last_error = str(exc)
+            LOGGER.warning(
+                "Health probe %s %s attempt %s/%s failed: %s",
+                method_upper,
+                url,
+                attempt,
+                MAX_HEALTH_RETRIES,
+                exc,
+            )
+        else:
+            last_response = response
+            preview = (response.text or "")[:200].strip()
+            LOGGER.info(
+                "Health probe %s %s attempt %s/%s -> %s %s",
+                method_upper,
+                url,
+                attempt,
+                MAX_HEALTH_RETRIES,
+                response.status_code,
+                preview,
+            )
+            if response.status_code in {401, 403}:
+                if not DATAHUB_TOKEN:
+                    raise AuthenticationRequiredError(
+                        "DataHub GMS requires authentication but DATAHUB_TOKEN is not set."
+                    )
+                raise AuthenticationRequiredError(
+                    f"Authentication failed for {url} (status {response.status_code})."
+                )
+            if response.status_code == 200:
+                return response, None
+            if response.status_code == 404:
+                return response, None
+            if 400 <= response.status_code < 500:
+                return response, None
+            last_error = f"status {response.status_code}"
+        if attempt < MAX_HEALTH_RETRIES:
+            delay = min(30.0, (2 ** (attempt - 1))) + random.uniform(0, 0.5)
+            LOGGER.warning(
+                "Retrying health probe %s in %.2f seconds (attempt %s/%s)",
+                url,
+                delay,
+                attempt,
+                MAX_HEALTH_RETRIES,
+            )
+            time.sleep(delay)
+    return last_response, last_error
+
+
+def _graphql_health_check(
+    session: requests.Session,
+    base_url: str,
+    headers: Dict[str, str],
+) -> Tuple[bool, Optional[requests.Response], Optional[str]]:
+    url = f"{base_url}{GRAPHQL_HEALTH_PATH}"
+    response, error = _probe_with_retries(
+        session,
+        "POST",
+        url,
+        headers,
+        json_payload={"query": GRAPHQL_HEALTH_QUERY},
+    )
+    if response is None:
+        return False, None, error
+    if response.status_code != 200:
+        return False, response, error
+    try:
+        payload = response.json()
+    except ValueError as exc:  # includes JSONDecodeError
+        return False, response, f"invalid JSON: {exc}"
+    errors = payload.get("errors")
+    if errors:
+        return False, response, f"GraphQL errors: {json.dumps(errors)[:200]}"
+    schema = payload.get("data", {}).get("__schema")
+    if schema:
+        LOGGER.info("GraphQL introspection succeeded at %s", url)
+        return True, response, None
+    return False, response, "GraphQL response missing __schema"
+
+
+def check_gms_health(
     session: requests.Session,
     base_url: str,
     base_headers: Dict[str, str],
 ) -> None:
-    for path in ("api/health", "api/graphiql"):
-        url = f"{base_url}/{path}"
-        try:
-            response = session.get(url, headers=base_headers, timeout=10)
-        except requests.RequestException as exc:  # pylint: disable=broad-except
-            raise RuntimeError(f"Failed to reach {url}: {exc}") from exc
-        if response.status_code in {401, 403}:
-            if not DATAHUB_TOKEN:
-                raise AuthenticationRequiredError(
-                    "DataHub GMS requires authentication but DATAHUB_TOKEN is not set."
-                )
-            raise RuntimeError(
-                f"Authentication failed for {url} (status {response.status_code})."
+    normalized_base = base_url.rstrip("/")
+    attempt_summaries: List[str] = []
+    healthy_endpoint = False
+    graphql_attempted = False
+    graphql_healthy = False
+
+    LOGGER.info(
+        "Validating DataHub GMS at %s using health paths: %s",
+        normalized_base,
+        ", ".join(HEALTH_CHECK_PATHS),
+    )
+
+    for path in HEALTH_CHECK_PATHS:
+        url = f"{normalized_base}{path}"
+        if path == GRAPHQL_HEALTH_PATH:
+            graphql_attempted = True
+            success, response, error = _graphql_health_check(
+                session, normalized_base, base_headers
             )
-        if response.status_code != 200:
-            preview = (response.text or "")[:200].strip()
-            raise RuntimeError(
-                f"Unexpected status {response.status_code} from {url}: {preview}"
-            )
+            attempt_summaries.append(_format_probe_summary(url, response, error))
+            if success:
+                graphql_healthy = True
+                break
+            continue
+        response, error = _probe_with_retries(
+            session,
+            "GET",
+            url,
+            base_headers,
+        )
+        attempt_summaries.append(_format_probe_summary(url, response, error))
+        if response is not None and response.status_code == 200:
+            healthy_endpoint = True
+
+    if not graphql_attempted:
+        success, response, error = _graphql_health_check(session, normalized_base, base_headers)
+        attempt_summaries.append(
+            _format_probe_summary(f"{normalized_base}{GRAPHQL_HEALTH_PATH}", response, error)
+        )
+        graphql_healthy = success
+        graphql_attempted = True
+
+    if graphql_healthy:
+        LOGGER.info("DataHub GMS at %s is ready (GraphQL responsive)", normalized_base)
+        return
+
+    details = "; ".join(summary for summary in attempt_summaries if summary)
+    if healthy_endpoint:
+        raise RuntimeError(
+            "GraphQL introspection failed despite reachable fallback endpoint(s). Attempts: "
+            + (details or "none")
+        )
+    raise RuntimeError(
+        "No healthy response received from DataHub GMS. Attempts: "
+        + (details or "none")
+    )
 
 
 def resolve_gms_url(session: requests.Session, base_headers: Dict[str, str]) -> str:
@@ -232,8 +456,8 @@ def resolve_gms_url(session: requests.Session, base_headers: Dict[str, str]) -> 
     for candidate in candidates:
         candidate = candidate.rstrip("/")
         try:
-            validate_endpoint(session, candidate, base_headers)
-            LOGGER.info("Validated DataHub GMS endpoint at %s", candidate)
+            check_gms_health(session, candidate, base_headers)
+            LOGGER.info("Resolved DataHub GMS URI to %s", candidate)
             return candidate
         except AuthenticationRequiredError:
             raise
