@@ -1,3 +1,6 @@
+
+import pwd
+
 import shutil
 import subprocess
 import tempfile
@@ -13,6 +16,29 @@ from action.models import DatasetRef
 from action.sdk_adapter import TokenizationSDKAdapter
 
 
+
+def _ensure_postgres_user():
+    """Ensure the postgres system user exists or skip the test."""
+
+    try:
+        pwd.getpwnam("postgres")
+        return
+    except KeyError:
+        pass
+
+    useradd = shutil.which("useradd")
+    if not useradd:
+        pytest.skip("useradd binary not available to create postgres user")
+
+    try:
+        subprocess.run([useradd, "-m", "postgres"], check=True, capture_output=True)
+    except subprocess.CalledProcessError as exc:
+        pytest.skip(f"cannot create postgres user: {exc}")
+    except PermissionError:
+        pytest.skip("insufficient permissions to create postgres user")
+
+
+
 def _run_as_postgres(args):
     cmd = ["runuser", "-u", "postgres", "--"] + [str(part) for part in args]
     return subprocess.run(cmd, check=True, capture_output=True)
@@ -20,9 +46,23 @@ def _run_as_postgres(args):
 
 @pytest.fixture(scope="session")
 def postgres_server():
-    bin_dir = subprocess.check_output(["pg_config", "--bindir"], text=True).strip()
+
+    if not shutil.which("runuser"):
+        pytest.skip("runuser command not available")
+
+    _ensure_postgres_user()
+
+    try:
+        bin_dir = subprocess.check_output(["pg_config", "--bindir"], text=True).strip()
+    except FileNotFoundError:
+        pytest.skip("pg_config not available; install libpq-dev/postgresql-client")
+
     initdb = Path(bin_dir) / "initdb"
     pg_ctl = Path(bin_dir) / "pg_ctl"
+
+    if not initdb.exists() or not pg_ctl.exists():
+        pytest.skip("Postgres server binaries not available")
+
 
     tmpdir = Path(tempfile.mkdtemp(prefix="pgdata-"))
     shutil.chown(tmpdir, user="postgres", group="postgres")
