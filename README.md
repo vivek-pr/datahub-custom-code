@@ -16,6 +16,35 @@ It is meant for local experimentation only: no hardening, no production security
 - `make psql` — open a `psql` shell against the demo Postgres database
 - `make down` — stop and remove containers, networks, and volumes
 
+## UI runner smoke test
+1. Build the shared runner/action image so both containers have the same Python environment:
+
+   ```bash
+   make runner-image
+   ```
+
+2. Start the stack:
+
+   ```bash
+   make up
+   ```
+
+3. In the DataHub UI go to **Ingestion → Sources → Add Source**, pick **Postgres**, select **Trigger Manually**, and paste the sample recipe from [`ingest/postgres_recipe.yml`](ingest/postgres_recipe.yml). When the job is submitted, the UI should show **PENDING → RUNNING → COMPLETED** and `docker compose logs -f ui-ingestion-runner` should include the connectivity check:
+
+   ```text
+   ui-ingestion-runner  | INFO [ui-runner] Running Postgres connectivity check against postgres:5432/postgres
+   ui-ingestion-runner  | INFO [ui-runner] Connectivity check succeeded for Postgres database postgres at postgres:5432
+   ui-ingestion-runner  | INFO [ui-runner] Ingestion and tokenization for urn:li:dataHubExecutionRequest:... completed successfully
+   ```
+
+4. Confirm the Base64 action ran and populated encoded tables:
+
+   ```bash
+   docker compose exec postgres psql -U datahub -d postgres -c "\dt encoded.*" -c "SELECT COUNT(*) FROM encoded.customers;"
+   ```
+
+   The output should list tables under the `encoded` schema with non-zero row counts.
+
 ## Run from UI
 1. Launch `http://localhost:9002`, sign in (`datahub` / `datahub`), and add a **Postgres** source. Paste the provided recipe from the task description or reuse `ingest/postgres_recipe.yml`.
 

@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+import psycopg
 import requests
 
 from datahub.ingestion.run.pipeline import Pipeline
@@ -252,8 +253,69 @@ def trigger_tokenization(recipe: Dict) -> None:
     LOGGER.info("Tokenization for pipeline %s finished", overrides.pipeline_name)
 
 
+def verify_postgres_connection(recipe: Dict) -> None:
+    source = recipe.get("source", {})
+    if str(source.get("type", "")).lower() != "postgres":
+        return
+    source_config = source.get("config", {})
+    host_port = source_config.get("host_port") or ""
+    host, _, port_text = host_port.partition(":")
+    if not host:
+        host = source_config.get("host") or os.environ.get(
+            "UI_RUNNER_DEFAULT_DB_HOST", "postgres"
+        )
+    if not port_text:
+        port_text = str(source_config.get("port") or os.environ.get("UI_RUNNER_DEFAULT_DB_PORT", "5432"))
+    try:
+        port = int(port_text)
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid Postgres port '{port_text}' in recipe") from exc
+    database = source_config.get("database") or source_config.get("dbname")
+    username = source_config.get("username") or source_config.get("user")
+    password = source_config.get("password")
+    missing = [field for field, value in [("database", database), ("username", username)] if not value]
+    if missing:
+        raise RuntimeError(
+            "Postgres smoke test missing required config values: " + ", ".join(missing)
+        )
+    LOGGER.info(
+        "Running Postgres connectivity check against %s:%s/%s", host, port, database
+    )
+    try:
+        with psycopg.connect(
+            host=host,
+            port=port,
+            dbname=database,
+            user=username,
+            password=password,
+            connect_timeout=5,
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+    except Exception as exc:  # pylint: disable=broad-except
+        raise RuntimeError(
+            "Unable to connect to Postgres at "
+            f"{host}:{port} for database '{database}' ({exc.__class__.__name__}: {exc})"
+        ) from exc
+    LOGGER.info(
+        "Connectivity check succeeded for Postgres database %s at %s:%s",
+        database,
+        host,
+        port,
+    )
+
+
 def run_ingestion(recipe: Dict, execution_urn: str, executor_id: str) -> int:
     prepared = prepare_recipe(recipe, execution_urn)
+    try:
+        verify_postgres_connection(prepared)
+    except Exception as exc:  # pylint: disable=broad-except
+        LOGGER.error(
+            "Pre-ingestion Postgres connectivity test failed for %s: %s",
+            execution_urn,
+            exc,
+        )
+        return 3
     LOGGER.info(
         "Starting ingestion for %s using executor %s (pipeline=%s)",
         execution_urn,
