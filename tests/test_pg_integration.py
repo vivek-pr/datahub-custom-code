@@ -1,4 +1,6 @@
+
 import pwd
+
 import shutil
 import subprocess
 import tempfile
@@ -12,6 +14,7 @@ import pytest
 from action import db_pg
 from action.models import DatasetRef
 from action.sdk_adapter import TokenizationSDKAdapter
+
 
 
 def _ensure_postgres_user():
@@ -35,6 +38,7 @@ def _ensure_postgres_user():
         pytest.skip("insufficient permissions to create postgres user")
 
 
+
 def _run_as_postgres(args):
     cmd = ["runuser", "-u", "postgres", "--"] + [str(part) for part in args]
     return subprocess.run(cmd, check=True, capture_output=True)
@@ -42,6 +46,7 @@ def _run_as_postgres(args):
 
 @pytest.fixture(scope="session")
 def postgres_server():
+
     if not shutil.which("runuser"):
         pytest.skip("runuser command not available")
 
@@ -57,6 +62,7 @@ def postgres_server():
 
     if not initdb.exists() or not pg_ctl.exists():
         pytest.skip("Postgres server binaries not available")
+
 
     tmpdir = Path(tempfile.mkdtemp(prefix="pgdata-"))
     shutil.chown(tmpdir, user="postgres", group="postgres")
