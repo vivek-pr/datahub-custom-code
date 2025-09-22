@@ -1,272 +1,69 @@
-# DataHub + Postgres Base64 Encoding PoC
+# DataHub + Postgres PII Encoding PoC
 
 ## Overview
-This proof-of-concept runs the DataHub quickstart stack beside a demo Postgres database on an Apple Silicon Mac. When you ingest metadata from Postgres, a lightweight DataHub Action captures the completion event and writes Base64-encoded copies of any TEXT/VARCHAR columns into an `encoded` schema.
-It is meant for local experimentation only: no hardening, no production security, and no guarantees about durability beyond the Docker containers it spins up.
-
-## Prerequisites
-- macOS 13+ on Apple Silicon (M1/M2) with Docker Desktop running
-- Python 3.11 available if you want to run the smoke test
-- `make`, `docker compose`, and enough disk for container images (multi-arch/arm64 ready)
+This proof of concept runs the DataHub quickstart stack next to a demo Postgres database. When a Postgres ingestion finishes, a
+regex-based PII classifier scans the ingested tables, hands the flagged columns to the Base64 encoder action, and writes results
+to `encoded.<table>`. Only columns matched by the classifier are encoded; non-sensitive columns are copied as-is. Everything is
+optimized for local experimentation—no production hardening or durability guarantees beyond the Docker containers it starts.
 
 ## Quick Start
-- `make up` — bring up the stack, seed Postgres, start the Base64 action watcher
-- `make ingest` — rerun the DataHub Postgres ingestion on demand
-- `make logs` — tail DataHub GMS + Base64 action logs together
-- `make psql` — open a `psql` shell against the demo Postgres database
-- `make down` — stop and remove containers, networks, and volumes
-
-## Ingestion Runner quick start
-The dedicated ingestion runner container now waits for upstream dependencies before executing the DataHub CLI. This ensures the
-CLI is never asked to `sleep` and that ingestion logs begin with useful health-check context.
-
-1. Build the ingestion runner image (automatically handled by `make up`, but available standalone):
-
-   ```bash
-   docker compose build ingestion
-   ```
-
-2. Bring the stack online if it is not already running:
-
+1. **Launch the stack**
    ```bash
    make up
    ```
-
-3. Launch the ingestion runner manually. The entrypoint will wait for the DataHub GMS health endpoint and the Postgres port
-   before invoking `datahub ingest -c /workspace/ingest/recipe.yml`:
-
+2. **Ingest Postgres metadata on demand**
    ```bash
    docker compose run --rm ingestion
    ```
-
-   Sample output:
-
-   ```text
-   2024-07-01T00:00:00Z Starting ingestion runner
-   2024-07-01T00:00:00Z Using recipe file: /workspace/ingest/recipe.yml
-   2024-07-01T00:00:00Z Waiting for DataHub GMS health at http://datahub-gms:8080/api/health
-   2024-07-01T00:00:05Z DataHub GMS health check succeeded (attempt 1)
-   2024-07-01T00:00:05Z DataHub GMS health payload: {"status":"HEALTHY"}
-   2024-07-01T00:00:05Z Waiting for database availability at postgres:5432
-   2024-07-01T00:00:06Z Database connectivity check succeeded (attempt 1)
-   2024-07-01T00:00:06Z Health checks passed. Executing ingestion
-   ```
-
-4. Check the CLI output for `COMPLETED` to confirm success. The container exits with a non-zero status if any health check or the
-   ingestion run fails.
-
-5. Optional: Run `scripts/test_ingestion_runner.sh` to assert the CLI completes and logs were produced. The script wraps the same
-   container invocation and fails fast if the log output is empty.
-
-## UI runner smoke test
-1. Build the shared runner/action image so both containers have the same Python environment:
-
+3. **Run classifier + encoder manually (optional)**
    ```bash
-   make runner-image
+   POSTGRES_HOST=localhost POSTGRES_PORT=5432 \
+   python -m scripts.run_classifier_and_encode \
+     --pipeline-name postgres_local_poc \
+     --platform postgres \
+     --schema-allow public.*
    ```
-
-2. Start the stack:
-
+4. **Inspect the encoded copy**
    ```bash
-   make up
+   docker compose exec postgres psql -U datahub -d postgres \
+     -c "\dt encoded.*" \
+     -c "SELECT email, phone_number FROM encoded.customers LIMIT 5;"
    ```
 
-3. In the DataHub UI go to **Ingestion → Sources → Add Source**, pick **Postgres**, select **Trigger Manually**, and paste the sample recipe from [`ingest/recipe.yml`](ingest/recipe.yml). When the job is submitted, the UI should show **PENDING → RUNNING → COMPLETED** and `docker compose logs -f ui-ingestion-runner` should include the connectivity check:
+The UI-driven helper (`ui_ingestion_runner`) still polls DataHub for ingestion completions and now invokes the classifier
+automatically. Logs for both the classifier and encoder appear under `docker compose logs -f ui-ingestion-runner base64-action`.
 
-   ```text
-   ui-ingestion-runner  | INFO [ui-runner] Running Postgres connectivity check against postgres:5432/postgres
-   ui-ingestion-runner  | INFO [ui-runner] Connectivity check succeeded for Postgres database postgres at postgres:5432
-   ui-ingestion-runner  | INFO [ui-runner] Ingestion and tokenization for urn:li:dataHubExecutionRequest:... completed successfully
-   ```
+## PII Classifier & Trigger
+- **Flow**: ingestion completes → classifier pulls tables from DataHub → regex rules mark PII → Base64 encoder rewrites flagged
+  columns into `encoded.<table>` with idempotent inserts.
+- **Configuration**: `actions/pii_classifier/config.yml` controls platform, default pipeline filter, sample size, and minimum
+  value matches. Override at runtime with:
+  - `PII_SAMPLE_ROWS` – rows to sample per table (default `200`).
+  - `PII_MIN_MATCHES` – minimum regex matches before a value-only rule fires (default `5`).
+  - `PIPELINE_NAME_FILTER` – skip events from other pipelines.
+- **Patterns** live in [`classifier/patterns.yml`](classifier/patterns.yml). Each rule offers a `column` regex and optional
+  `value` regex. Update patterns and re-run the classifier; no rebuild required.
+- **Logs** clearly report progress:
+  ```text
+  pii-flow      | INFO Scanning 3 table(s) for PII using 4 regex rules
+  pii-flow      | INFO Table public.customers flagged columns: email, phone_number, reference_code
+  base64-action | INFO Encoding dataset urn:li:dataset:(...,public.customers,PROD) => public.customers (columns: email, phone_number, reference_code)
+  base64-action | INFO Finished encoding urn:li:dataset:(...,public.customers,PROD) (42 rows)
+  ```
 
-4. Confirm the Base64 action ran and populated encoded tables:
+## Ingestion helpers
+- `make up` / `make down` – start or stop the quickstart stack.
+- `docker compose run --rm ingestion` – run the CLI recipe at [`ingest/recipe.yml`](ingest/recipe.yml).
+- `docker compose logs -f ui-ingestion-runner` – watch UI-triggered ingestions and classifier hand-offs.
 
-   ```bash
-   docker compose exec postgres psql -U datahub -d postgres -c "\dt encoded.*" -c "SELECT COUNT(*) FROM encoded.customers;"
-   ```
+## Testing & CI
+- `pytest -vv` runs unit tests (regex rules) plus an end-to-end test that seeds Postgres, executes ingestion, runs the classifier,
+  and validates the `encoded` schema. The e2e path assumes Docker and the stack are available.
+- GitHub Actions workflow [`ci.yml`](.github/workflows/ci.yml) builds the helper images, starts the stack via `docker compose`,
+  runs ingestion, executes the classifier + encoder, and finishes with the full pytest suite.
 
-   The output should list tables under the `encoded` schema with non-zero row counts.
-
-## Run from UI
-1. Launch `http://localhost:9002`, sign in (`datahub` / `datahub`), and add a **Postgres** source. Paste the provided recipe from the task description or reuse `ingest/recipe.yml`.
-
-   ```yaml
-   pipeline_name: urn:li:dataHubIngestionSource:0ce41f93-2590-40e5-8f25-fbc7b2433170
-   source:
-     type: postgres
-     config:
-       host_port: host.docker.internal:5432
-       database: lseat
-       username: postgres
-       password: postgres
-       schema_pattern:
-         allow:
-           - public.*
-       profiling:
-         enabled: true
-         profile_table_level_only: true
-   ```
-
-   _Expected helper logs while the recipe is normalized for containers:_
-
-   ```text
-   ui-ingestion-runner | INFO [ui-runner] Prepared recipe for urn:li:dataHubExecutionRequest:... (pipeline=urn:li:dataHubIngestionSource:0ce41f93-...)
-   ui-ingestion-runner | INFO [ui-runner] Starting ingestion for urn:li:dataHubExecutionRequest:... using executor ui-ingestion-runner (pipeline=...)
-   ui-ingestion-runner | INFO [ui-runner] Ingestion and tokenization for urn:li:dataHubExecutionRequest:... completed successfully
-   ```
-
-2. Open **Ingestion → Runs**. The run should advance from **PENDING → RUNNING → SUCCEEDED** with logs.
-
-   ```text
-   ui-ingestion-runner | INFO [ui-runner] Detected pending execution urn:li:dataHubExecutionRequest:...
-   datahub-frontend   | ... Run status transitioned to RUNNING (logs streaming)
-   ui-ingestion-runner | INFO [ui-runner] Execution urn:li:dataHubExecutionRequest:... finished with status SUCCEEDED
-   ```
-
-3. Confirm automatic tokenization with `docker compose logs -f base64-action`.
-
-   ```text
-   base64-action      | INFO base64-action Action ready. Watching DataHub runs for platform='postgres' pipeline='urn:li:dataHubIngestionSource:0ce41f93-...'
-   base64-action      | INFO base64-action Processing 3 dataset(s) for run id scan-1700001234
-   base64-action      | INFO base64-action Encoding urn:li:dataset:(urn:li:dataPlatform:postgres,lseat.public.customers,PROD) => public.customers (text columns: first_name, email)
-   base64-action      | INFO base64-action Finished encoding urn:li:dataset:(...,orders,PROD) (120 rows)
-   ```
-
-4. Re-run the same source from the UI. Tokenization should skip unchanged tables instead of duplicating them.
-
-   ```text
-   ui-ingestion-runner | INFO [ui-runner] Detected pending execution urn:li:dataHubExecutionRequest:...
-   base64-action      | INFO base64-action No data change detected for urn:li:dataset:(...,customers,PROD); skipping
-   base64-action      | INFO base64-action No data change detected for urn:li:dataset:(...,orders,PROD); skipping
-   ```
-
-5. Verify the encoded schema from `psql`.
-
-   ```sql
-   \dn+ encoded
-   SELECT COUNT(*) FROM encoded.customers;
-   ```
-
-   ```text
-   encoded | datahub | ...
-   count
-   -------
-       120
-   ```
-
-Acceptance checks:
-- UI run shows **RUNNING → COMPLETED** with non-empty logs (no “No Output”).
-- `encoded` schema exists; table counts mirror source; TEXT/VARCHAR columns are Base64 values.
-- Re-running from UI does not duplicate rows (`base64-action` logs “No data change detected”).
-- `make ingest` continues to succeed for the CLI path.
-
-## Step-by-Step: What Happens
-
-### Step 1 — Start services (`make up`)
-Brings up DataHub (GMS, Frontend, Kafka, MySQL, OpenSearch), Postgres with sample tables, and the Base64 action container. The make target waits for GMS health before seeding metadata.
-
-```bash
-make up
-```
-
-Expected log highlights:
-```text
-datahub-gms        | INFO  main DataHub GMS started on port 8080
-postgres           | LOG   database system is ready to accept connections
-base64-action      | INFO  Action ready. Watching DataHub runs for platform='postgres' pipeline='postgres_local_poc'.
-ui-ingestion-runner | INFO [ui-runner] Starting poller against http://datahub-gms:8080 (interval=15s, executor=ui-ingestion-runner)
-```
-
-### Step 2 — Ingest metadata (`make ingest`)
-Runs the recipe at `ingest/recipe.yml`, which points at `postgres:5432` with user `datahub/datahub` and filters `public.*`. The command executes inside the dedicated `ingestion` container.
-
-```bash
-make ingest
-```
-
-Expected log highlights:
-```text
-ingestion-run   | INFO  Starting postgres ingest (ingest/recipe.yml)
-ingestion-run   | INFO  Discovered tables: public.customers, public.orders, public.payments
-ingestion-run   | INFO  Emitted 3 MetadataChangeEvents to http://datahub-gms:8080
-ingestion-run   | INFO  Postgres ingestion completed successfully
-```
-
-### Step 3 — Tokenization action runs automatically
-The action watches for ingestion completion events where `platform=postgres` and (by default) `pipeline_name=postgres_local_poc`. When those appear, it enumerates the datasets, Base64-encodes textual columns, and upserts into `encoded.<table>`.
-
-```bash
-make logs
-```
-
-Expected log highlights:
-```text
-base64-action   | INFO  Processing 3 dataset(s) for run id scan-1700000000
-base64-action   | INFO  Encoding urn:li:dataset:(urn:li:dataPlatform:postgres,postgres.public.customers,PROD) => public.customers (text columns: first_name, email)
-base64-action   | INFO  Finished encoding urn:li:dataset:(...,PROD) (120 rows)
-base64-action   | INFO  No data change detected for urn:li:dataset:(...,orders,PROD); skipping
-```
-
-### Step 4 — Verify results (`make psql`)
-Connect to Postgres and inspect the encoded tables. You should see Base64 strings in place of plain text.
-
-```bash
-make psql
-```
-
-Inside `psql`:
-```sql
-SELECT first_name, email FROM encoded.customers LIMIT 3;
-```
-
-Sample output:
-```text
- first_name |          email
-------------+---------------------------
- TWFyeQ==   | bWFyeUBleGFtcGxlLmNvbQ==
- Sm9u       | am9uQGV4YW1wbGUuY29t
- IFNlbmE=   | c2VuYUBleGFtcGxlLm5ldA==
-```
-
-## How the Trigger Works
-- Ingestion finishes -> DataHub GMS emits a metadata change completion event.
-- The Base64 action filters events for `platform=postgres` (and optional `pipeline_name`).
-- Matching events cause the action to connect to Postgres, create the `encoded` schema if needed, and copy tables while Base64-encoding TEXT/VARCHAR columns.
-- Runs are idempotent thanks to the `encoded._action_audit` table: unchanged tables are skipped on subsequent scans.
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant "DataHub Ingest"
-    participant "GMS Event"
-    participant Action
-    participant "Postgres (encoded)"
-    User->>"DataHub Ingest": make ingest
-    "DataHub Ingest"->>"GMS Event": Emit completion
-    "GMS Event"->>Action: Trigger (platform=postgres)
-    Action->>"Postgres (encoded)": Write encoded.<table>
-```
-
-## Troubleshooting Guide
-- **UI run stuck in PENDING / No Output**: verify UI ingestion is enabled (`UI_INGESTION_ENABLED=true` in `docker-compose.yml`) and the helper container can reach GMS. Run `docker compose logs -f ui-ingestion-runner` to confirm it prints “Starting poller …”.
-- **Database connection failures**: the runner rewrites `localhost`/`host.docker.internal` to the Docker service name automatically. If the source lives elsewhere, adjust `host_port` and confirm reachability with `docker compose exec ingestion nc -vz <host> <port>`.
-- **Tokenization not firing**: check `base64-action` logs for “Action ready …” followed by dataset summaries. Missing logs often mean the pipeline name or database name does not match the ingestion recipe; ensure the UI recipe’s values align with the Base64 overrides.
-- **Permission or auth errors**: the helper and action use the same credentials as the UI recipe. Update both the recipe and the `.env`/`docker-compose.yml` overrides if passwords change.
-- **Endpoint sanity checks**: `curl http://localhost:8080/health` validates GMS; `curl -XPOST http://localhost:8080/api/graphql -d '{"query":"{ health { status } }"}'` ensures GraphQL responds. Use `docker compose logs -f datahub-gms datahub-frontend` for deeper errors.
-
-## Configuration You Might Change
-- `ingest/recipe.yml` — adjust `host_port`, credentials, schema filters, or pipeline name.
-- `actions/base64_action/config.yml` — override `gms_url`, `platform`, `pipeline_name`, and the Postgres connection block; env vars with the same names take precedence.
-- `Makefile` (`PIPELINE_NAME`) — keep this in sync with the ingestion recipe if you change it so the action filter still matches.
-
-## Troubleshooting
-- **Hostname mismatch**: If logs show `could not translate host`, ensure the recipe uses Docker service names (e.g. `postgres`) while local tools use `localhost`.
-- **Connection refused**: Confirm ports 8080 and 5432 are free and the containers are running with `docker ps`.
-- **No encoded tables**: Check `make logs` for action errors and re-run `make ingest` to emit fresh events.
-- **Apple Silicon images**: All images are multi-arch; if pulls fail, update Docker Desktop and retry.
-
-## Clean Up
-```bash
-make down
-```
-Removes all running containers, networks, and volumes created for this PoC.
+## Tweaking the classifier quickly
+1. Edit `classifier/patterns.yml` to add or adjust regexes.
+2. Optionally bump `PII_SAMPLE_ROWS` / `PII_MIN_MATCHES` for noisier datasets.
+3. Re-run `python -m scripts.run_classifier_and_encode ...` (or trigger an ingestion through the UI). Encoded tables refresh in
+   place without duplicating rows.

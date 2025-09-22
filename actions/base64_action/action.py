@@ -4,7 +4,8 @@ import json
 import logging
 import os
 import time
-from typing import List, Optional, Set, Tuple
+from collections import defaultdict
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import psycopg
 from psycopg import sql
@@ -66,6 +67,38 @@ class Base64EncodeAction:
         self._process_pending_runs()
         LOGGER.info("One-time processing complete.")
 
+    def process_with_allowlist(
+        self, column_allowlist: Dict[Tuple[str, str], Set[str]]
+    ) -> None:
+        """Encode only the explicitly provided columns for matching datasets."""
+        normalized: Dict[Tuple[str, str], Set[str]] = {}
+        for (schema, table), columns in column_allowlist.items():
+            if not columns:
+                continue
+            key = (schema.lower(), table.lower())
+            normalized[key] = {column for column in columns if column}
+        if not normalized:
+            LOGGER.info("Column allowlist empty; nothing to encode")
+            return
+        LOGGER.info(
+            "Processing explicit column allowlist for %d table(s)", len(normalized)
+        )
+        self._process_pending_runs(column_allowlist=normalized)
+
+    def list_matching_datasets(self) -> List[DatasetIdentifier]:
+        identifiers: List[DatasetIdentifier] = []
+        urns = self._list_dataset_urns()
+        if not urns:
+            return identifiers
+        for dataset_urn in urns:
+            identifier = self._parse_dataset_urn(dataset_urn)
+            if not identifier:
+                continue
+            if not self._dataset_matches_filters(identifier):
+                continue
+            identifiers.append(identifier)
+        return identifiers
+
     def _ensure_support_tables(self) -> None:
         with self.conn.cursor() as cur:
             cur.execute("CREATE SCHEMA IF NOT EXISTS encoded")
@@ -92,7 +125,11 @@ class Base64EncodeAction:
             )
         self.conn.commit()
 
-    def _process_pending_runs(self, run_id: Optional[str] = None) -> None:
+    def _process_pending_runs(
+        self,
+        run_id: Optional[str] = None,
+        column_allowlist: Optional[Dict[Tuple[str, str], Set[str]]] = None,
+    ) -> None:
         try:
             urns = self._list_dataset_urns()
         except Exception as exc:  # pylint: disable=broad-except
@@ -108,9 +145,43 @@ class Base64EncodeAction:
         run_id = run_id or f"scan-{int(time.time())}"
         LOGGER.info("Processing %d dataset(s) for run id %s", len(urns), run_id)
 
+        explicit_columns = column_allowlist or {}
+        processed = 0
+        skipped = defaultdict(int)
+
         for dataset_urn in urns:
             try:
-                self._process_dataset(dataset_urn, run_id)
+                identifier = self._parse_dataset_urn(dataset_urn)
+                if not identifier:
+                    LOGGER.warning("Could not parse dataset URN %s", dataset_urn)
+                    continue
+                if not self._dataset_matches_filters(identifier):
+                    LOGGER.debug(
+                        "Skipping dataset %s because it does not match filters (database=%s, allowlist=%s)",
+                        dataset_urn,
+                        self.config.database.dbname,
+                        ", ".join(self.config.schema_allowlist) or "<all>",
+                    )
+                    continue
+                if column_allowlist is not None:
+                    key = (identifier.schema.lower(), identifier.table.lower())
+                    allowed = explicit_columns.get(key)
+                    if not allowed:
+                        skipped["no_allowlist"] += 1
+                        LOGGER.debug(
+                            "Skipping dataset %s because it is not present in the explicit column allowlist",
+                            dataset_urn,
+                        )
+                        continue
+                    self._process_dataset(
+                        dataset_urn,
+                        run_id,
+                        identifier=identifier,
+                        explicit_columns=allowed,
+                    )
+                else:
+                    self._process_dataset(dataset_urn, run_id, identifier=identifier)
+                processed += 1
             except Exception as dataset_exc:  # pylint: disable=broad-except
                 LOGGER.exception(
                     "Failed to process dataset %s during run %s: %s",
@@ -118,6 +189,12 @@ class Base64EncodeAction:
                     run_id,
                     dataset_exc,
                 )
+        if column_allowlist is not None:
+            LOGGER.info(
+                "Explicit allowlist run complete: %d dataset(s) processed, %d skipped without matches",
+                processed,
+                skipped["no_allowlist"],
+            )
 
     def _list_dataset_urns(self) -> List[str]:
         batch_size = max(self.config.page_size, 25)
@@ -142,24 +219,25 @@ class Base64EncodeAction:
 
         return urns
 
-    def _process_dataset(self, dataset_urn: str, run_id: str) -> None:
-        identifier = self._parse_dataset_urn(dataset_urn)
+    def _process_dataset(
+        self,
+        dataset_urn: str,
+        run_id: str,
+        identifier: Optional[DatasetIdentifier] = None,
+        explicit_columns: Optional[Iterable[str]] = None,
+    ) -> None:
+        identifier = identifier or self._parse_dataset_urn(dataset_urn)
         if not identifier:
             LOGGER.warning("Could not parse dataset URN %s", dataset_urn)
             return
-        if not self._dataset_matches_filters(identifier):
-            LOGGER.debug(
-                "Skipping dataset %s because it does not match filters (database=%s, allowlist=%s)",
-                dataset_urn,
-                self.config.database.dbname,
-                ", ".join(self.config.schema_allowlist) or "<all>",
-            )
-            return
+
         schema_name, table_name = identifier.schema, identifier.table
-        schema_metadata = self._get_schema_metadata(dataset_urn)
-        if not schema_metadata:
-            LOGGER.warning("No schema metadata available for %s", dataset_urn)
-            return
+        schema_metadata: Optional[SchemaMetadataClass] = None
+        if explicit_columns is None:
+            schema_metadata = self._get_schema_metadata(dataset_urn)
+            if not schema_metadata:
+                LOGGER.warning("No schema metadata available for %s", dataset_urn)
+                return
 
         ordered_columns = self._fetch_table_columns(schema_name, table_name)
         if not ordered_columns:
@@ -169,10 +247,17 @@ class Base64EncodeAction:
                 table_name,
             )
             return
-
-        text_columns = self._textual_columns_from_metadata(schema_metadata)
+        if explicit_columns is not None:
+            requested = {column.lower() for column in explicit_columns}
+            text_columns = {
+                column.lower()
+                for column in ordered_columns
+                if column.lower() in requested
+            }
+        else:
+            text_columns = self._textual_columns_from_metadata(schema_metadata)  # type: ignore[arg-type]
         LOGGER.info(
-            "Encoding dataset %s => %s.%s (text columns: %s)",
+            "Encoding dataset %s => %s.%s (columns: %s)",
             dataset_urn,
             schema_name,
             table_name,
@@ -185,6 +270,14 @@ class Base64EncodeAction:
 
         if self._should_skip_dataset(dataset_urn, checksum, row_count):
             LOGGER.info("No data change detected for %s; skipping", dataset_urn)
+            return
+
+        if explicit_columns is not None and not text_columns:
+            LOGGER.info(
+                "No matching columns from explicit allowlist for %s.%s; skipping",
+                schema_name,
+                table_name,
+            )
             return
 
         self._apply_encoding(schema_name, table_name, ordered_columns, text_columns)

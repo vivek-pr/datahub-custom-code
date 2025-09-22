@@ -1,0 +1,6 @@
+# Configuration for the regex-based PII classifier.
+platform: postgres
+pipeline_name_filter: postgres_local_poc
+sample_rows: 200
+min_matches: 5
+patterns_path: classifier/patterns.yml
