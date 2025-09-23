@@ -1,87 +1,148 @@
-# Tokenize POC for DataHub Actions
+# DataHub Tokenization POC – End-to-End Flow
 
-This repository packages the "Inside DataHub Tokenization (PG + Databricks)" proof of concept as a self-contained, reproducible environment. It builds a Dockerised FastAPI DataHub Action, provisions Postgres inside Kubernetes, and runs end-to-end smoke tests that prove deterministic tokenisation and idempotency for both the Postgres and optional Databricks paths.
+This proof of concept wires the "Inside DataHub Tokenization (PG + Databricks)" action into a
+full UI-triggered experience. Adding the tag `tokenize/run` to a dataset from the DataHub UI
+causes the action to discover PII columns, tokenize them in the source system, and write a status
+summary back to the dataset page.
+
+```
+DataHub UI ──┐
+             ▼
+      tokenize/run tag               ┌─────────────┐
+             │                       │  DataHub    │
+             │                       │  Action     │
+             │                       └────┬────────┘
+             ▼                            │
+   DataHub Metadata ⟵───────┐             │
+             │              │             ▼
+             │        PII detector     Postgres /
+             │              │           Databricks
+             │              │             │
+             ▼              │             ▼
+ last_tokenization_run ◀────┴───── tokenized values + tags
+```
+
+## Quick start
+
+```bash
+make build && make up              # build the Docker image and deploy the action
+make ingest                        # register datasets via DataHub ingestion
+make seed-pg                       # load demo customers(id,email,phone)
+make trigger-ui                    # add tokenize/run to the sample dataset
+make wait-status                   # block until last_tokenization_run.status == SUCCESS
+make verify-idempotent             # re-run to ensure zero rows updated
+make down                          # tear everything down when finished
+```
+
+`make e2e` runs the entire happy path: `build → up → ingest → seed-pg → trigger-ui → wait-status → verify-idempotent`.
 
 ## Prerequisites
 
-Install the following tools locally:
+* Docker, kubectl, and helm on your PATH
+* minikube (default) or kind (`CLUSTER=kind`)
+* `jq` for the helper scripts
+* A running DataHub instance with access to `DATAHUB_GMS` and (optionally) `DATAHUB_TOKEN`
 
-* [Docker](https://docs.docker.com/get-docker/)
-* [kubectl](https://kubernetes.io/docs/tasks/tools/)
-* [helm](https://helm.sh/docs/intro/install/)
-* Either [minikube](https://minikube.sigs.k8s.io/docs/) (default) or [kind](https://kind.sigs.k8s.io/) – set `CLUSTER=kind` for kind
-* Python 3.11+
+The first `make up` copies `k8s/secrets.example.env` to `k8s/secrets.env`. Fill it in with the
+connection strings for:
 
-All Kubernetes manifests live in the `tokenize-poc` namespace by default. Secrets are rendered from `k8s/secrets.env`; the first run copies `k8s/secrets.example.env` and continues with the baked-in Postgres defaults. `DBX_JDBC_URL` is blank by default so the Databricks flow is skipped until you fill it in.
+* `PG_CONN_STR` – the Postgres instance to tokenize
+* `DATAHUB_GMS`/`DATAHUB_TOKEN` – REST endpoint + personal access token
+* `DBX_JDBC_URL` – optional JDBC URL for a Databricks SQL warehouse (leave blank to skip)
+* `DBX_CATALOG`, `DBX_SCHEMA`, `DBX_TABLE` – optional Databricks identifiers
 
-## One-liner workflow
+These values are mounted into the action container and also drive the ingestion jobs.
 
-```bash
-make build && make up && make run && make down
+## Ingestion recipes
+
+`make ingest` runs two recipes using the `datahub` CLI (installed into `.venv/`):
+
+* `ingestion/postgres.yml` – connects to the seeded Postgres instance (via a temporary port-forward)
+  and registers the `public.customers` table.
+* `ingestion/databricks.yml` – optional Databricks ingestion. The target is skipped cleanly when
+  `DBX_JDBC_URL` is unset.
+
+The CLI uses `DATAHUB_GMS`/`DATAHUB_TOKEN` for the REST sink. Sample dataset name: `public.customers`.
+A corresponding dataset URN will look like:
+
+```
+urn:li:dataset:(urn:li:dataPlatform:postgres,<database>.public.customers,PROD)
 ```
 
-* `make build` – builds the action Docker image (`tokenize-poc/action:local`).
-* `make up` – starts minikube/kind, installs Bitnami Postgres, renders secrets, deploys the action, waits for `/healthz`, and seeds 100 demo rows.
-* `make run` – port-forwards to the action and triggers the Postgres path twice (first run updates rows, second run is idempotent). If `DBX_JDBC_URL` is populated, the Databricks flow is executed with the same assertions.
-* `make down` – removes the namespace, Helm release, and deletes the cluster/profile to leave no residue.
+`scripts/find_dataset_urn.py` will locate the exact URN by name + platform if you do not know it yet.
 
-### Switching to kind locally
+## Triggering from the UI (or CLI)
 
-The Makefile auto-detects the cluster via the `CLUSTER` variable. To mirror the CI path locally, run:
+1. Navigate to the dataset in DataHub and add the tag `tokenize/run` at either the dataset or field level.
+   The action polls the metadata change log and starts a run as soon as the tag appears.
+2. The run discovers PII columns via `action/pii_detector.py`:
+   * columns already tagged with `pii.*` or `sensitive`
+   * otherwise heuristics for names like `email`, `phone`, `contact`, `ssn`, `aadhaar`
+3. Each plaintext value becomes `tok_<base64>_poc` (idempotent; existing tokens are skipped).
+4. Status is pushed back to DataHub in the editable properties under `last_tokenization_run` along with
+   dataset tags `tokenize/done` and `tokenize/status:SUCCESS`.
+
+The helper scripts make it easy to simulate UI actions:
 
 ```bash
-make build CLUSTER=kind IMAGE_TAG=local
-make up CLUSTER=kind
-make run CLUSTER=kind
-make down CLUSTER=kind
+scripts/add_tag.sh "$DATASET_URN"         # attach tokenize/run
+scripts/poll_status.sh "$DATASET_URN"     # wait for SUCCESS and print the JSON status
+scripts/e2e.sh                              # run once and then verify idempotency
 ```
 
-## Continuous integration
+A successful status payload looks like:
 
-`.github/workflows/ci.yaml` runs on pushes and pull requests:
+```json
+{
+  "run_id": "...",
+  "started_at": "2024-06-01T12:00:00Z",
+  "ended_at": "2024-06-01T12:00:04Z",
+  "platform": "postgres",
+  "columns": ["email", "phone"],
+  "rows_updated": 100,
+  "rows_skipped": 0,
+  "status": "SUCCESS",
+  "message": "Tokenized columns email, phone; updated 100 rows, skipped 0."
+}
+```
 
-1. **lint-unit** installs dev requirements, runs ShellCheck across every script, and then executes `make test` (which covers `ruff`, `black --check`, `scripts/verify_printf.sh`, and `pytest`).
-2. **e2e-kind** provisions a kind cluster, smoke-tests the lifecycle with `make up` / `make down`, rebuilds the cluster for the full `make up` / `make run` flow, and always tears resources down. On any failure, `scripts/diag.sh` captures pods, events, and logs which are uploaded as build artifacts.
+Re-running `scripts/add_tag.sh` after a successful run reports `rows_updated=0` and leaves `tokenize/run`
+cleared from the dataset and fields.
 
-## Toolbox
+## Action internals
 
-* `make test` – sets up a Python virtualenv, lints (`ruff`/`black`), asserts safe shell printing via `scripts/verify_printf.sh`, and runs all tests. `tests/test_pg_integration.py` spins up a disposable local Postgres to verify transactional behaviour.
-* `make trigger-pg` / `make trigger-dbx` – manual invocations against the Kubernetes service.
-* `make diag` – prints nodes, namespace resources, events, and recent action/Postgres logs.
-* `make reset-pg` – sanitises stale Helm releases/resources in the namespace so the Bitnami chart can be re-installed cleanly.
-* `make ci` – convenience target that runs the kind-based E2E locally.
+* `action/mcl_consumer.py` polls DataHub via GraphQL for datasets or fields tagged with `tokenize/run`.
+* `action/datahub_client.py` implements the GraphQL helpers for reading schema metadata, adding/removing
+  tags, and writing editable dataset properties.
+* `action/run_manager.py` orchestrates each run, including platform selection, tokenization, status
+  emission, and tag hygiene (`tokenize/done`, `tokenize/status:*`, `tokenized`).
+* `action/pii_detector.py` is pluggable: drop a YAML file and set `PII_CONFIG_PATH` to customise patterns.
+* `action/db_pg.py` / `action/db_dbx.py` issue transactional updates with regex guards to keep tokens
+  idempotent (`^tok_[A-Za-z0-9+/=]+_poc$`).
 
-`scripts/run_e2e.py` performs readiness checks by port-forwarding to the action and asserting the first trigger updates rows while the second updates none. `scripts/diag.sh` is also invoked automatically by CI whenever a failure occurs.
+## Tests
 
-### Helm ownership mismatch auto-fix
+```
+make test        # ruff + black --check + shell printf validation + pytest
+```
 
-If previous runs left Helm-managed resources (for example `NetworkPolicy/postgresql`) annotated for an older release, Helm 3 refuses to adopt them. `make up` invokes `scripts/helm_sanitize_pg.sh` to uninstall the stale release (if present) and delete conflicting resources before reinstalling `tokenize-poc-postgresql`. Run `make reset-pg` manually to perform the cleanup on demand.
-
-## Implementation highlights
-
-* **Deterministic tokens** – `tok_<base64(value)>_poc` lives in `action/token_logic.py`. Existing tokens are recognised via regex so re-processing is a no-op.
-* **Idempotent Postgres updates** – `action/db_pg.py` executes `SELECT ... FOR UPDATE` in a single transaction and only issues targeted `UPDATE`s when plaintext values exist. Batch size is capped via the trigger `limit`.
-* **Optional Databricks support** – `action/db_dbx.py` parses a Databricks JDBC URL, connects via the SQL connector, and applies the same tokenisation/detection loop. When `DBX_JDBC_URL` is absent, both the smoke test and API return a clear skip message.
-* **Robust orchestration** – `scripts/up.sh` sanitises stray Helm ownership metadata before installing the Bitnami Postgres release, waits for `pg_isready`, probes `/healthz` from inside the cluster, and seeds Postgres idempotently. `scripts/down.sh` uninstalls the release, deletes conflicting resources, and tears the cluster down.
-* **Non-root container** – the Docker image installs dependencies on `python:3.11-slim`, copies the app into `/app`, and switches to UID `10001` before launching `uvicorn`.
+Unit tests cover the PII detector heuristics, token regex, and the status payload schema.
 
 ## Troubleshooting
 
-* `make up` fails because dependencies are missing – ensure `docker`, `kubectl`, `helm`, and your chosen cluster driver (`minikube` or `kind`) are installed and visible in `$PATH`.
-* Postgres pods stay Pending – check container runtime resources. `scripts/diag.sh` summarises pod status and events.
-* `make run` hangs – confirm port 18080 is free and that the action pod reached `Ready`. `make logs` tails the deployment.
-* `/healthz` probe fails – ensure the container command points to `action.app:app` in `docker/action.Dockerfile`, confirm the service and deployment share the `app.kubernetes.io/name=tokenize-poc-action` label, and verify endpoints exist via `kubectl -n tokenize-poc get endpoints tokenize-poc-action -o yaml`. Inspect pod logs with `kubectl -n tokenize-poc logs deploy/tokenize-poc-action` and reapply `k8s/networkpolicy-allow-action.yaml` if your cluster enforces default-deny.
-* Databricks flow skipped – populate `DBX_JDBC_URL` inside `k8s/secrets.env`. The value is base64-encoded into a Kubernetes secret automatically.
-* Helm refuses to install Postgres due to ownership mismatch – earlier runs may have left resources annotated for a different release. `make up` calls `scripts/helm_sanitize_pg.sh` automatically, or run `make reset-pg` manually to uninstall the stale release and delete conflicting resources before re-deploying.
-* Want to re-run everything fresh – `make down` deletes the namespace and underlying cluster, making reruns idempotent.
-* Saw `printf: '(' invalid format character` in older scripts – the logging utilities now render timestamps with `date` and quote all values before calling `printf`. Running `make test` executes `scripts/verify_printf.sh`, which guards against regressions involving percent signs or parentheses in data.
+* `make ingest` fails – ensure `datahub` CLI is installed via `make test` or `make ingest` (it lives in `.venv`).
+* `scripts/poll_status.sh` keeps waiting – confirm the action pod logs (`kubectl -n tokenize-poc logs deploy/tokenize-poc-action`).
+* No datasets discovered – run `python scripts/find_dataset_urn.py public.customers --platform postgres` to confirm
+  ingestion registered the dataset and that the name matches `DATASET_NAME`/`DATASET_PLATFORM`.
+* `tokenize/run` never clears – a failure keeps the tag so you can retry. Check `last_tokenization_run.status`
+  for the error message and fix the underlying connectivity issue.
+* Databricks optional – leave `DBX_JDBC_URL` blank to skip ingestion and tokenization for Databricks.
 
-## Why this satisfies the HLD
+## Cleanup
 
-The implementation demonstrates:
+```
+make down
+```
 
-* **Deterministic, reversible dummy tokenisation** with explicit detection preventing re-tokenisation.
-* **Transactional Postgres writes** using `SELECT ... FOR UPDATE` followed by batched `UPDATE`s inside a single commit.
-* **Databricks parity** through the SQL Warehouse connector with opt-in testing guarded by secrets.
-* **Operational safety** via health probes, readiness checks, and automated diagnostics for both local runs and CI.
-* **Developer ergonomics** with `make` targets, reproducible Docker builds, and a single-command E2E that matches the CI pipeline.
+`make down` uninstalls the Helm release, deletes the Kubernetes namespace, and tears down the minikube/kind cluster
+profile so reruns start cleanly.

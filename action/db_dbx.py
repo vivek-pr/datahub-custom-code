@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, List
+from typing import Dict, List, Sequence
 from urllib.parse import parse_qs
 
 from databricks import sql as dbsql
 
-from .models import DatasetRef
+from .models import DatasetRef, TokenizationResult
 from .sdk_adapter import TokenizationSDKAdapter
 from .token_logic import TOKEN_REGEX
 
-logger = logging.getLogger(__name__)
+LOGGER = logging.getLogger(__name__)
 
 
 def parse_jdbc_url(url: str) -> Dict[str, str]:
@@ -40,15 +40,15 @@ def parse_jdbc_url(url: str) -> Dict[str, str]:
 def tokenize_table(
     jdbc_url: str,
     dataset: DatasetRef,
-    columns: List[str],
+    columns: Sequence[str],
     limit: int,
     adapter: TokenizationSDKAdapter,
-) -> Dict[str, int]:
+) -> TokenizationResult:
     parsed = parse_jdbc_url(jdbc_url)
     updated_rows = 0
     skipped_rows = 0
 
-    logger.info("Connecting to Databricks warehouse at %s", parsed["host"])
+    LOGGER.info("Connecting to Databricks warehouse at %s", parsed["host"])
     with dbsql.connect(
         server_hostname=parsed["host"],
         http_path=parsed["http_path"],
@@ -67,7 +67,7 @@ def tokenize_table(
             params.append(limit)
             cursor.execute(select_sql, params)
             rows = cursor.fetchall()
-            logger.info("Fetched %s candidate rows from Databricks", len(rows))
+            LOGGER.info("Fetched %s candidate rows from Databricks", len(rows))
 
             for row in rows:
                 row_id = row[0]
@@ -90,9 +90,11 @@ def tokenize_table(
                 updated_rows += 1
         connection.commit()
 
-    logger.info(
+    LOGGER.info(
         "Databricks tokenization complete: %s updated, %s skipped",
         updated_rows,
         skipped_rows,
     )
-    return {"updated_count": updated_rows, "skipped_count": skipped_rows}
+    return TokenizationResult(
+        columns=columns, rows_updated=updated_rows, rows_skipped=skipped_rows
+    )

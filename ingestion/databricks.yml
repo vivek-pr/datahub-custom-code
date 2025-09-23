@@ -1,0 +1,20 @@
+source:
+  type: databricks
+  config:
+    server_hostname: "${INGEST_DBX_SERVER}"
+    http_path: "${INGEST_DBX_HTTP_PATH}"
+    token: "${INGEST_DBX_TOKEN}"
+    catalog: "${INGEST_DBX_CATALOG}"
+    schema_pattern:
+      allow:
+        - "${INGEST_DBX_SCHEMA}"
+    table_pattern:
+      allow:
+        - "${INGEST_DBX_TABLE}"
+    profiling:
+      enabled: false
+sink:
+  type: datahub-rest
+  config:
+    server: "${DATAHUB_GMS}"
+    token: "${DATAHUB_TOKEN}"

@@ -3,3 +3,4 @@ black==24.4.2
 ruff==0.4.8
 pytest==8.2.2
 pytest-mock==3.14.0
+acryl-datahub==1.2.0.9
