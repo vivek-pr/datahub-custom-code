@@ -1,0 +1,20 @@
+source:
+  type: postgres
+  config:
+    username: "${INGEST_PG_USERNAME}"
+    password: "${INGEST_PG_PASSWORD}"
+    host_port: "${INGEST_PG_HOST}:${INGEST_PG_PORT}"
+    database: "${INGEST_PG_DATABASE}"
+    schema_pattern:
+      allow:
+        - public
+    table_pattern:
+      allow:
+        - customers
+    profiling:
+      enabled: false
+sink:
+  type: datahub-rest
+  config:
+    server: "${DATAHUB_GMS}"
+    token: "${DATAHUB_TOKEN}"

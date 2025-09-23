@@ -65,15 +65,30 @@ MSG
   local pg_conn_str="${PG_CONN_STR:-}"
   local dbx_jdbc_url="${DBX_JDBC_URL:-}"
   local token_sdk_mode="${TOKEN_SDK_MODE:-dummy}"
+  local datahub_gms="${DATAHUB_GMS:-}"
+  local datahub_token="${DATAHUB_TOKEN:-}"
+  local dbx_catalog="${DBX_CATALOG:-}"
+  local dbx_schema="${DBX_SCHEMA:-}"
+  local dbx_table="${DBX_TABLE:-}"
   if [[ -z "$pg_conn_str" ]]; then
     echo "PG_CONN_STR must be set in k8s/secrets.env" >&2
+    exit 1
+  fi
+  if [[ -z "$datahub_gms" ]]; then
+    echo "DATAHUB_GMS must be set in k8s/secrets.env" >&2
     exit 1
   fi
   python - "$NAMESPACE" "$pg_conn_str" "$dbx_jdbc_url" "$token_sdk_mode" <<'PYIN' | kubectl apply -f -
 import json
 import sys
+import os
 
 namespace, pg_conn, dbx_jdbc, token_mode = sys.argv[1:5]
+datahub_gms = os.environ.get("DATAHUB_GMS", "")
+datahub_token = os.environ.get("DATAHUB_TOKEN", "")
+dbx_catalog = os.environ.get("DBX_CATALOG", "")
+dbx_schema = os.environ.get("DBX_SCHEMA", "")
+dbx_table = os.environ.get("DBX_TABLE", "")
 
 manifest = {
     "apiVersion": "v1",
@@ -87,6 +102,11 @@ manifest = {
         "PG_CONN_STR": pg_conn,
         "DBX_JDBC_URL": dbx_jdbc,
         "TOKEN_SDK_MODE": token_mode,
+        "DATAHUB_GMS": datahub_gms,
+        "DATAHUB_TOKEN": datahub_token,
+        "DBX_CATALOG": dbx_catalog,
+        "DBX_SCHEMA": dbx_schema,
+        "DBX_TABLE": dbx_table,
     },
 }
 
@@ -228,8 +248,6 @@ main() {
   render_and_apply "$ROOT_DIR/k8s/action-deployment.yaml.tpl"
 
   wait_for_action
-
-  "$ROOT_DIR/scripts/seed_pg.sh" "$NAMESPACE"
 
   log "Environment ready"
 }
