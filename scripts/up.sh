@@ -55,22 +55,18 @@ MSG
   fi
   # shellcheck disable=SC1090
   source "$secrets_file"
-  local pg_b64 dbx_b64 mode_b64
-  pg_b64=$(printf '%s' "${PG_CONN_STR:-}" | base64 | tr -d '\n')
-  dbx_b64=$(printf '%s' "${DBX_JDBC_URL:-}" | base64 | tr -d '\n')
-  mode_b64=$(printf '%s' "${TOKEN_SDK_MODE:-dummy}" | base64 | tr -d '\n')
-  cat <<'SECRET' | kubectl apply -f -
-apiVersion: v1
-kind: Secret
-metadata:
-  name: tokenize-poc-secrets
-  namespace: ${NAMESPACE}
-type: Opaque
-data:
-  PG_CONN_STR: ${pg_b64}
-  DBX_JDBC_URL: ${dbx_b64}
-  TOKEN_SDK_MODE: ${mode_b64}
-SECRET
+  local pg_conn_str="${PG_CONN_STR:-}"
+  local dbx_jdbc_url="${DBX_JDBC_URL:-}"
+  local token_sdk_mode="${TOKEN_SDK_MODE:-dummy}"
+  if [[ -z "$pg_conn_str" ]]; then
+    echo "PG_CONN_STR must be set in k8s/secrets.env" >&2
+    exit 1
+  fi
+  kubectl -n "$NAMESPACE" create secret generic tokenize-poc-secrets \
+    --from-literal=PG_CONN_STR="$pg_conn_str" \
+    --from-literal=DBX_JDBC_URL="$dbx_jdbc_url" \
+    --from-literal=TOKEN_SDK_MODE="$token_sdk_mode" \
+    --dry-run=client -o yaml | kubectl apply -f -
 }
 
 start_cluster() {

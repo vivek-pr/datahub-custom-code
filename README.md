@@ -12,7 +12,7 @@ Install the following tools locally:
 * Either [minikube](https://minikube.sigs.k8s.io/docs/) (default) or [kind](https://kind.sigs.k8s.io/) – set `CLUSTER=kind` for kind
 * Python 3.11+
 
-All Kubernetes manifests live in the `tokenize-poc` namespace by default. Secrets are rendered from `k8s/secrets.env`; the first run copies `k8s/secrets.example.env` and continues with the baked-in Postgres defaults. Populate `DBX_JDBC_URL` if you want to exercise the Databricks path.
+All Kubernetes manifests live in the `tokenize-poc` namespace by default. Secrets are rendered from `k8s/secrets.env`; the first run copies `k8s/secrets.example.env` and continues with the baked-in Postgres defaults. `DBX_JDBC_URL` is blank by default so the Databricks flow is skipped until you fill it in.
 
 ## One-liner workflow
 
