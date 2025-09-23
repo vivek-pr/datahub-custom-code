@@ -40,12 +40,12 @@ make down CLUSTER=kind
 
 `.github/workflows/ci.yaml` runs on pushes and pull requests:
 
-1. **lint-unit** installs dev requirements, runs `ruff`, `black --check`, and executes `pytest`.
-2. **e2e-kind** provisions a kind cluster, builds the action image tagged with the commit SHA, runs `make up`/`make run`, and always tears the cluster down with `make down`. On failure, `scripts/diag.sh` captures pods, events, and logs which are uploaded as build artifacts.
+1. **lint-unit** installs dev requirements, runs ShellCheck across every script, and then executes `make test` (which covers `ruff`, `black --check`, `scripts/verify_printf.sh`, and `pytest`).
+2. **e2e-kind** provisions a kind cluster, smoke-tests the lifecycle with `make up` / `make down`, rebuilds the cluster for the full `make up` / `make run` flow, and always tears resources down. On any failure, `scripts/diag.sh` captures pods, events, and logs which are uploaded as build artifacts.
 
 ## Toolbox
 
-* `make test` – sets up a Python virtualenv, lints (`ruff`/`black`), and runs all tests. `tests/test_pg_integration.py` spins up a disposable local Postgres to verify transactional behaviour.
+* `make test` – sets up a Python virtualenv, lints (`ruff`/`black`), asserts safe shell printing via `scripts/verify_printf.sh`, and runs all tests. `tests/test_pg_integration.py` spins up a disposable local Postgres to verify transactional behaviour.
 * `make trigger-pg` / `make trigger-dbx` – manual invocations against the Kubernetes service.
 * `make diag` – prints nodes, namespace resources, events, and recent action/Postgres logs.
 * `make ci` – convenience target that runs the kind-based E2E locally.
@@ -67,6 +67,7 @@ make down CLUSTER=kind
 * `make run` hangs – confirm port 18080 is free and that the action pod reached `Ready`. `make logs` tails the deployment.
 * Databricks flow skipped – populate `DBX_JDBC_URL` inside `k8s/secrets.env`. The value is base64-encoded into a Kubernetes secret automatically.
 * Want to re-run everything fresh – `make down` deletes the namespace and underlying cluster, making reruns idempotent.
+* Saw `printf: '(' invalid format character` in older scripts – the logging utilities now render timestamps with `date` and quote all values before calling `printf`. Running `make test` executes `scripts/verify_printf.sh`, which guards against regressions involving percent signs or parentheses in data.
 
 ## Why this satisfies the HLD
 

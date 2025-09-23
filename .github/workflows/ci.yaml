@@ -12,6 +12,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: ShellCheck
+        uses: ludeeus/action-shellcheck@v2
+        with:
+          severity: warning
+          check_together: true
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -67,7 +73,16 @@ jobs:
       - name: Build action image
         env:
           IMAGE_TAG: ${{ env.IMAGE_TAG }}
-        run: make build IMAGE_TAG=${IMAGE_TAG} CLUSTER=kind
+        run: make build IMAGE_TAG="${IMAGE_TAG}" CLUSTER=kind
+
+      - name: Lifecycle smoke (up & down)
+        env:
+          IMAGE_TAG: ${{ env.IMAGE_TAG }}
+          K8S_NS: ${{ env.K8S_NS }}
+        run: |
+          set -eu
+          make up CLUSTER=kind IMAGE_TAG="${IMAGE_TAG}" K8S_NS="${K8S_NS}"
+          make down CLUSTER=kind K8S_NS="${K8S_NS}"
 
       - name: Provision environment and run smoke tests
         env:
@@ -75,14 +90,14 @@ jobs:
           K8S_NS: ${{ env.K8S_NS }}
         run: |
           set -e
-          make up CLUSTER=kind IMAGE_TAG=${IMAGE_TAG} K8S_NS=${K8S_NS}
-          make run K8S_NS=${K8S_NS}
+          make up CLUSTER=kind IMAGE_TAG="${IMAGE_TAG}" K8S_NS="${K8S_NS}"
+          make run K8S_NS="${K8S_NS}"
 
       - name: Diagnostics on failure
         if: failure()
         env:
           K8S_NS: ${{ env.K8S_NS }}
-        run: ./scripts/diag.sh ${K8S_NS} > diagnostics.log || true
+        run: ./scripts/diag.sh "${K8S_NS}" > diagnostics.log || true
 
       - name: Upload diagnostics
         if: failure()
@@ -96,4 +111,4 @@ jobs:
         env:
           IMAGE_TAG: ${{ env.IMAGE_TAG }}
           K8S_NS: ${{ env.K8S_NS }}
-        run: make down CLUSTER=kind K8S_NS=${K8S_NS}
+        run: make down CLUSTER=kind K8S_NS="${K8S_NS}"

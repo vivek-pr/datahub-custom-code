@@ -13,7 +13,9 @@ KIND_CLUSTER_NAME=${KIND_CLUSTER_NAME:-tokenize-poc}
 POSTGRES_RELEASE=${POSTGRES_RELEASE:-tokenize-poc-postgresql}
 
 log() {
-  printf '[%(%Y-%m-%dT%H:%M:%S%z)T] %s\n' -1 "$*"
+  local now
+  now=$(date +%Y-%m-%dT%H:%M:%S%z)
+  printf '[%s] %s\n' "$now" "$*"
 }
 
 require_cmd() {

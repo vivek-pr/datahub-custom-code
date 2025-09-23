@@ -1,6 +1,6 @@
-SHELL := /bin/bash
+SHELL := /bin/sh
 .ONESHELL:
-.SHELLFLAGS := -eu -o pipefail -c
+.SHELLFLAGS := -eu -c
 
 ROOT_DIR := $(CURDIR)
 IMAGE_NAME ?= tokenize-poc/action
@@ -25,69 +25,70 @@ BLACK := $(VENV)/bin/black
 build:
 	DOCKER_BUILDKIT=1 docker build \
 		--file docker/action.Dockerfile \
-		--tag $(IMAGE_REF) \
+		--tag "$(IMAGE_REF)" \
 		.
 
 push:
-	docker push $(IMAGE_REF)
+	docker push "$(IMAGE_REF)"
 
 up:
-	CLUSTER=$(CLUSTER) \
-	IMAGE_NAME=$(IMAGE_NAME) \
-	IMAGE_TAG=$(IMAGE_TAG) \
-	IMAGE_REF=$(IMAGE_REF) \
-	K8S_NS=$(K8S_NS) \
-	MINIKUBE_PROFILE=$(MINIKUBE_PROFILE) \
-	MINIKUBE_DRIVER=$(MINIKUBE_DRIVER) \
-	KIND_CLUSTER_NAME=$(KIND_CLUSTER_NAME) \
-	POSTGRES_RELEASE=$(POSTGRES_RELEASE) \
+	CLUSTER="$(CLUSTER)" \
+	IMAGE_NAME="$(IMAGE_NAME)" \
+	IMAGE_TAG="$(IMAGE_TAG)" \
+	IMAGE_REF="$(IMAGE_REF)" \
+	K8S_NS="$(K8S_NS)" \
+	MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" \
+	MINIKUBE_DRIVER="$(MINIKUBE_DRIVER)" \
+	KIND_CLUSTER_NAME="$(KIND_CLUSTER_NAME)" \
+	POSTGRES_RELEASE="$(POSTGRES_RELEASE)" \
 	./scripts/up.sh
 
 run:
-	$(PYTHON) ./scripts/run_e2e.py --namespace $(K8S_NS)
+	"$(PYTHON)" ./scripts/run_e2e.py --namespace "$(K8S_NS)"
 
 down:
-	CLUSTER=$(CLUSTER) \
-	K8S_NS=$(K8S_NS) \
-	MINIKUBE_PROFILE=$(MINIKUBE_PROFILE) \
-	KIND_CLUSTER_NAME=$(KIND_CLUSTER_NAME) \
-	POSTGRES_RELEASE=$(POSTGRES_RELEASE) \
+	CLUSTER="$(CLUSTER)" \
+	K8S_NS="$(K8S_NS)" \
+	MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" \
+	KIND_CLUSTER_NAME="$(KIND_CLUSTER_NAME)" \
+	POSTGRES_RELEASE="$(POSTGRES_RELEASE)" \
 	./scripts/down.sh
 
 logs:
-	kubectl -n $(K8S_NS) logs deployment/tokenize-poc-action -f
+	kubectl -n "$(K8S_NS)" logs deployment/tokenize-poc-action -f
 
 diag:
-	./scripts/diag.sh $(K8S_NS)
+	./scripts/diag.sh "$(K8S_NS)"
 
 trigger-pg:
-	./scripts/trigger.sh --namespace $(K8S_NS) --dataset "urn:li:dataset:(urn:li:dataPlatform:postgres,postgres.schema.customers,PROD)" --columns email,phone --limit 100
+	./scripts/trigger.sh --namespace "$(K8S_NS)" --dataset 'urn:li:dataset:(urn:li:dataPlatform:postgres,postgres.schema.customers,PROD)' --columns email,phone --limit 100
 
 trigger-dbx:
-	./scripts/trigger.sh --namespace $(K8S_NS) --dataset "urn:li:dataset:(urn:li:dataPlatform:databricks,tokenize.schema.customers,PROD)" --columns email,phone --limit 100
+	./scripts/trigger.sh --namespace "$(K8S_NS)" --dataset 'urn:li:dataset:(urn:li:dataPlatform:databricks,tokenize.schema.customers,PROD)' --columns email,phone --limit 100
 
 $(VENV)/bin/python:
-	$(PYTHON) -m venv $(VENV)
+	"$(PYTHON)" -m venv "$(VENV)"
 
 lint: $(VENV)/bin/python
-	$(PIP) install -r requirements-dev.txt
-	$(RUFF) check action tests
+	"$(PIP)" install -r requirements-dev.txt
+	"$(RUFF)" check action tests
 
 fmt: $(VENV)/bin/python
-	$(PIP) install -r requirements-dev.txt
-	$(BLACK) action tests
+	"$(PIP)" install -r requirements-dev.txt
+	"$(BLACK)" action tests
 
 clean:
-	rm -rf $(VENV)
+	rm -rf "$(VENV)"
 
 test: $(VENV)/bin/python
-	$(PIP) install -r requirements-dev.txt
-	$(RUFF) check action tests
-	$(BLACK) --check action tests
-	$(PYTEST)
+	"$(PIP)" install -r requirements-dev.txt
+	"$(RUFF)" check action tests
+	"$(BLACK)" --check action tests
+	./scripts/verify_printf.sh
+	"$(PYTEST)"
 
 ci:
-	$(MAKE) build CLUSTER=kind IMAGE_TAG=$(IMAGE_TAG)
-	$(MAKE) up CLUSTER=kind IMAGE_TAG=$(IMAGE_TAG) K8S_NS=$(K8S_NS)
-	$(MAKE) run K8S_NS=$(K8S_NS)
-	$(MAKE) down CLUSTER=kind K8S_NS=$(K8S_NS)
+	$(MAKE) build CLUSTER=kind IMAGE_TAG="$(IMAGE_TAG)"
+	$(MAKE) up CLUSTER=kind IMAGE_TAG="$(IMAGE_TAG)" K8S_NS="$(K8S_NS)"
+	$(MAKE) run K8S_NS="$(K8S_NS)"
+	$(MAKE) down CLUSTER=kind K8S_NS="$(K8S_NS)"
