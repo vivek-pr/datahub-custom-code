@@ -2,29 +2,32 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: tokenize-poc-action
-  namespace: tokenize-poc
+  namespace: ${NAMESPACE}
   labels:
     app: tokenize-poc-action
+    app.kubernetes.io/name: tokenize-poc-action
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: tokenize-poc-action
+      app: tokenize-poc-action   # <-- keep the ORIGINAL immutable selector
   template:
     metadata:
       labels:
         app: tokenize-poc-action
+        app.kubernetes.io/name: tokenize-poc-action
     spec:
       serviceAccountName: tokenize-poc-action
       securityContext:
-        runAsUser: 1000
+        runAsUser: 10001
         runAsNonRoot: true
       containers:
         - name: action
-          image: tokenize-poc-action:latest
+          image: ${IMAGE_REF}
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
+              name: http
           env:
             - name: PG_CONN_STR
               valueFrom:
@@ -44,15 +47,16 @@ spec:
           readinessProbe:
             httpGet:
               path: /healthz
-              port: 8080
-            initialDelaySeconds: 5
-            periodSeconds: 10
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 3
+            failureThreshold: 10
           livenessProbe:
             httpGet:
               path: /healthz
-              port: 8080
-            initialDelaySeconds: 15
-            periodSeconds: 20
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
           resources:
             requests:
               cpu: 50m

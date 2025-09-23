@@ -60,3 +60,5 @@ jspm_packages/
 *.7z
 *.rar
 .helm-charts/
+
+k8s/secrets.env
