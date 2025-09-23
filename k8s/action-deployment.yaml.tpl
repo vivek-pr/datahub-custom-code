@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: tokenize-poc-action
-  namespace: tokenize-poc
+  namespace: ${NAMESPACE}
   labels:
     app: tokenize-poc-action
 spec:
@@ -17,11 +17,11 @@ spec:
     spec:
       serviceAccountName: tokenize-poc-action
       securityContext:
-        runAsUser: 1000
+        runAsUser: 10001
         runAsNonRoot: true
       containers:
         - name: action
-          image: tokenize-poc-action:latest
+          image: ${IMAGE_REF}
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080

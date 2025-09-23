@@ -5,7 +5,6 @@ import time
 from pathlib import Path
 
 import psycopg2
-from psycopg2 import extensions
 import pytest
 
 from action import db_pg
@@ -13,23 +12,19 @@ from action.models import DatasetRef
 from action.sdk_adapter import TokenizationSDKAdapter
 
 
-def _run_as_postgres(args):
-    cmd = ["runuser", "-u", "postgres", "--"] + [str(part) for part in args]
-    return subprocess.run(cmd, check=True, capture_output=True)
-
-
 @pytest.fixture(scope="session")
 def postgres_server():
-    bin_dir = subprocess.check_output(["pg_config", "--bindir"], text=True).strip()
+    try:
+        bin_dir = subprocess.check_output(["pg_config", "--bindir"], text=True).strip()
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        pytest.skip("pg_config not available; install PostgreSQL client binaries")
     initdb = Path(bin_dir) / "initdb"
     pg_ctl = Path(bin_dir) / "pg_ctl"
+    if not initdb.exists() or not pg_ctl.exists():
+        pytest.skip("PostgreSQL client binaries are not installed")
 
-    tmpdir = Path(tempfile.mkdtemp(prefix="pgdata-"))
-    shutil.chown(tmpdir, user="postgres", group="postgres")
-    tmpdir.chmod(0o775)
-    data_dir = tmpdir
-
-    _run_as_postgres([initdb, "-D", data_dir])
+    data_dir = Path(tempfile.mkdtemp(prefix="pgdata-"))
+    subprocess.run([str(initdb), "-D", str(data_dir)], check=True)
 
     port = 55432
     logfile = data_dir / "logfile"
@@ -43,7 +38,7 @@ def postgres_server():
         logfile,
         "start",
     ]
-    _run_as_postgres(start_cmd)
+    subprocess.run([str(part) for part in start_cmd], check=True)
 
     conn_str_admin = f"postgresql://postgres@127.0.0.1:{port}/postgres"
 
@@ -66,7 +61,11 @@ def postgres_server():
         "data_dir": data_dir,
     }
 
-    _run_as_postgres([pg_ctl, "-D", data_dir, "stop", "-m", "fast"])
+    subprocess.run(
+        [str(pg_ctl), "-D", str(data_dir), "stop", "-m", "fast"],
+        check=True,
+    )
+    shutil.rmtree(data_dir, ignore_errors=True)
 
 
 @pytest.fixture
@@ -74,7 +73,6 @@ def seeded_database(postgres_server):
     conn_str_admin = postgres_server["conn_str_admin"]
     conn_str = conn_str_admin
     with psycopg2.connect(conn_str) as conn:
-        conn.set_isolation_level(extensions.ISOLATION_LEVEL_AUTOCOMMIT)
         conn.autocommit = True
         with conn.cursor() as cur:
             cur.execute("DROP SCHEMA IF EXISTS schema CASCADE")

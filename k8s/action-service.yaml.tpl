@@ -2,7 +2,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: tokenize-poc-action
-  namespace: tokenize-poc
+  namespace: ${NAMESPACE}
   labels:
     app: tokenize-poc-action
 spec:
