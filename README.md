@@ -70,6 +70,7 @@ If previous runs left Helm-managed resources (for example `NetworkPolicy/postgre
 * `make up` fails because dependencies are missing – ensure `docker`, `kubectl`, `helm`, and your chosen cluster driver (`minikube` or `kind`) are installed and visible in `$PATH`.
 * Postgres pods stay Pending – check container runtime resources. `scripts/diag.sh` summarises pod status and events.
 * `make run` hangs – confirm port 18080 is free and that the action pod reached `Ready`. `make logs` tails the deployment.
+* `/healthz` probe fails – ensure the container command points to `action.app:app` in `docker/action.Dockerfile`, confirm the service and deployment share the `app.kubernetes.io/name=tokenize-poc-action` label, and verify endpoints exist via `kubectl -n tokenize-poc get endpoints tokenize-poc-action -o yaml`. Inspect pod logs with `kubectl -n tokenize-poc logs deploy/tokenize-poc-action` and reapply `k8s/networkpolicy-allow-action.yaml` if your cluster enforces default-deny.
 * Databricks flow skipped – populate `DBX_JDBC_URL` inside `k8s/secrets.env`. The value is base64-encoded into a Kubernetes secret automatically.
 * Helm refuses to install Postgres due to ownership mismatch – earlier runs may have left resources annotated for a different release. `make up` calls `scripts/helm_sanitize_pg.sh` automatically, or run `make reset-pg` manually to uninstall the stale release and delete conflicting resources before re-deploying.
 * Want to re-run everything fresh – `make down` deletes the namespace and underlying cluster, making reruns idempotent.

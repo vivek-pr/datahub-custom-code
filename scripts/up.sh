@@ -160,9 +160,37 @@ wait_for_postgres() {
 wait_for_action() {
   log "Waiting for action deployment rollout"
   kubectl -n "$NAMESPACE" rollout status deployment/tokenize-poc-action --timeout=300s
+
+  log "Waiting for tokenize-poc-action service endpoints"
+  local endpoint_ips=""
+  for _ in $(seq 1 40); do
+    endpoint_ips=$(kubectl -n "$NAMESPACE" get endpoints tokenize-poc-action -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || true)
+    if [[ -n "$endpoint_ips" ]]; then
+      break
+    fi
+    sleep 3
+  done
+
+  if [[ -z "$endpoint_ips" ]]; then
+    echo "Service tokenize-poc-action has no ready endpoints" >&2
+    kubectl -n "$NAMESPACE" get svc tokenize-poc-action -o wide || true
+    kubectl -n "$NAMESPACE" get endpoints tokenize-poc-action -o yaml || true
+    kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=tokenize-poc-action -o wide || true
+    exit 2
+  fi
+
   log "Probing /healthz"
-  kubectl -n "$NAMESPACE" run action-health-check --rm -i --restart=Never --image=curlimages/curl:8.7.1 --command -- \
-    sh -c "for i in $(seq 1 30); do if curl -sf http://tokenize-poc-action:8080/healthz >/dev/null; then exit 0; fi; sleep 2; done; exit 1" >/dev/null
+  if ! kubectl -n "$NAMESPACE" run action-health-check \
+    --image=curlimages/curl:8.8.0 \
+    --rm --restart=Never --attach -- \
+    curl -fsS -m 5 "http://tokenize-poc-action.${NAMESPACE}.svc.cluster.local:8080/healthz" >/dev/null; then
+    echo "Action /healthz probe failed" >&2
+    kubectl -n "$NAMESPACE" logs deployment/tokenize-poc-action --tail=200 || true
+    kubectl -n "$NAMESPACE" describe svc tokenize-poc-action || true
+    kubectl -n "$NAMESPACE" get endpoints tokenize-poc-action -o yaml || true
+    exit 2
+  fi
+
   log "Action service is healthy"
 }
 
@@ -196,6 +224,7 @@ main() {
   load_image_into_cluster
 
   render_and_apply "$ROOT_DIR/k8s/action-service.yaml.tpl"
+  render_and_apply "$ROOT_DIR/k8s/networkpolicy-allow-action.yaml.tpl"
   render_and_apply "$ROOT_DIR/k8s/action-deployment.yaml.tpl"
 
   wait_for_action

@@ -4,16 +4,16 @@ metadata:
   name: tokenize-poc-action
   namespace: ${NAMESPACE}
   labels:
-    app: tokenize-poc-action
+    app.kubernetes.io/name: tokenize-poc-action
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: tokenize-poc-action
+      app.kubernetes.io/name: tokenize-poc-action
   template:
     metadata:
       labels:
-        app: tokenize-poc-action
+        app.kubernetes.io/name: tokenize-poc-action
     spec:
       serviceAccountName: tokenize-poc-action
       securityContext:
@@ -25,6 +25,7 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
+              name: http
           env:
             - name: PG_CONN_STR
               valueFrom:
@@ -44,15 +45,16 @@ spec:
           readinessProbe:
             httpGet:
               path: /healthz
-              port: 8080
-            initialDelaySeconds: 5
-            periodSeconds: 10
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 3
+            failureThreshold: 10
           livenessProbe:
             httpGet:
               path: /healthz
-              port: 8080
-            initialDelaySeconds: 15
-            periodSeconds: 20
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
           resources:
             requests:
               cpu: 50m
