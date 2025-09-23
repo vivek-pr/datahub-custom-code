@@ -4,15 +4,17 @@ metadata:
   name: tokenize-poc-action
   namespace: ${NAMESPACE}
   labels:
+    app: tokenize-poc-action
     app.kubernetes.io/name: tokenize-poc-action
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: tokenize-poc-action
+      app: tokenize-poc-action   # <-- keep the ORIGINAL immutable selector
   template:
     metadata:
       labels:
+        app: tokenize-poc-action
         app.kubernetes.io/name: tokenize-poc-action
     spec:
       serviceAccountName: tokenize-poc-action
