@@ -62,11 +62,29 @@ MSG
     echo "PG_CONN_STR must be set in k8s/secrets.env" >&2
     exit 1
   fi
-  kubectl -n "$NAMESPACE" create secret generic tokenize-poc-secrets \
-    --from-literal=PG_CONN_STR="$pg_conn_str" \
-    --from-literal=DBX_JDBC_URL="$dbx_jdbc_url" \
-    --from-literal=TOKEN_SDK_MODE="$token_sdk_mode" \
-    --dry-run=client -o yaml | kubectl apply -f -
+  python - "$NAMESPACE" "$pg_conn_str" "$dbx_jdbc_url" "$token_sdk_mode" <<'PYIN' | kubectl apply -f -
+import json
+import sys
+
+namespace, pg_conn, dbx_jdbc, token_mode = sys.argv[1:5]
+
+manifest = {
+    "apiVersion": "v1",
+    "kind": "Secret",
+    "metadata": {
+        "name": "tokenize-poc-secrets",
+        "namespace": namespace,
+    },
+    "type": "Opaque",
+    "stringData": {
+        "PG_CONN_STR": pg_conn,
+        "DBX_JDBC_URL": dbx_jdbc,
+        "TOKEN_SDK_MODE": token_mode,
+    },
+}
+
+json.dump(manifest, sys.stdout)
+PYIN
 }
 
 start_cluster() {
