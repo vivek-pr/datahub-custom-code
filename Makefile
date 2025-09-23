@@ -7,11 +7,13 @@ IMAGE_NAME ?= tokenize-poc/action
 IMAGE_TAG ?= local
 IMAGE_REF := $(IMAGE_NAME):$(IMAGE_TAG)
 K8S_NS ?= tokenize-poc
+PG_RELEASE ?= tokenize-poc-postgresql
+PG_CHART ?= oci://registry-1.docker.io/bitnamicharts/postgresql
+PG_VALUES ?= k8s/postgres-values.yaml
 CLUSTER ?= minikube
 MINIKUBE_PROFILE ?= tokenize-poc
 MINIKUBE_DRIVER ?= docker
 KIND_CLUSTER_NAME ?= tokenize-poc
-POSTGRES_RELEASE ?= tokenize-poc-postgresql
 
 PYTHON ?= python3
 VENV ?= .venv
@@ -20,7 +22,7 @@ PYTEST := $(VENV)/bin/pytest
 RUFF := $(VENV)/bin/ruff
 BLACK := $(VENV)/bin/black
 
-.PHONY: build push up run down logs diag test fmt lint trigger-pg trigger-dbx ci clean
+.PHONY: build push up down reset-pg run logs diag test fmt lint trigger-pg trigger-dbx ci clean
 
 build:
 	DOCKER_BUILDKIT=1 docker build \
@@ -32,6 +34,7 @@ push:
 	docker push "$(IMAGE_REF)"
 
 up:
+	$(MAKE) reset-pg
 	CLUSTER="$(CLUSTER)" \
 	IMAGE_NAME="$(IMAGE_NAME)" \
 	IMAGE_TAG="$(IMAGE_TAG)" \
@@ -40,7 +43,9 @@ up:
 	MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" \
 	MINIKUBE_DRIVER="$(MINIKUBE_DRIVER)" \
 	KIND_CLUSTER_NAME="$(KIND_CLUSTER_NAME)" \
-	POSTGRES_RELEASE="$(POSTGRES_RELEASE)" \
+	PG_RELEASE="$(PG_RELEASE)" \
+	PG_CHART="$(PG_CHART)" \
+	PG_VALUES="$(PG_VALUES)" \
 	./scripts/up.sh
 
 run:
@@ -51,8 +56,13 @@ down:
 	K8S_NS="$(K8S_NS)" \
 	MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" \
 	KIND_CLUSTER_NAME="$(KIND_CLUSTER_NAME)" \
-	POSTGRES_RELEASE="$(POSTGRES_RELEASE)" \
+	PG_RELEASE="$(PG_RELEASE)" \
 	./scripts/down.sh
+
+reset-pg:
+	chmod +x scripts/helm_sanitize_pg.sh
+	printf '%s\n' ">> Sanitizing Postgres Helm leftovers in ns '$(K8S_NS)'"
+	./scripts/helm_sanitize_pg.sh "$(K8S_NS)" "postgresql" "$(PG_RELEASE)"
 
 logs:
 	kubectl -n "$(K8S_NS)" logs deployment/tokenize-poc-action -f

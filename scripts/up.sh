@@ -10,7 +10,12 @@ IMAGE_REF=${IMAGE_REF:-$IMAGE_NAME:$IMAGE_TAG}
 MINIKUBE_PROFILE=${MINIKUBE_PROFILE:-tokenize-poc}
 MINIKUBE_DRIVER=${MINIKUBE_DRIVER:-docker}
 KIND_CLUSTER_NAME=${KIND_CLUSTER_NAME:-tokenize-poc}
-POSTGRES_RELEASE=${POSTGRES_RELEASE:-tokenize-poc-postgresql}
+PG_RELEASE=${PG_RELEASE:-tokenize-poc-postgresql}
+PG_CHART=${PG_CHART:-oci://registry-1.docker.io/bitnamicharts/postgresql}
+PG_VALUES=${PG_VALUES:-$ROOT_DIR/k8s/postgres-values.yaml}
+if [[ "${PG_VALUES}" != /* ]]; then
+  PG_VALUES="$ROOT_DIR/${PG_VALUES}"
+fi
 
 log() {
   local now
@@ -168,20 +173,23 @@ main() {
   ensure_image
   start_cluster
 
+  log "Sanitizing Postgres Helm leftovers"
+  "$ROOT_DIR/scripts/helm_sanitize_pg.sh" "$NAMESPACE" "postgresql" "$PG_RELEASE"
+
   export NAMESPACE IMAGE_REF
 
   render_and_apply "$ROOT_DIR/k8s/namespace.yaml.tpl"
   apply_secret
   render_and_apply "$ROOT_DIR/k8s/rbac.yaml.tpl"
 
-  helm repo add bitnami https://charts.bitnami.com/bitnami >/dev/null 2>&1 || true
-  helm repo update >/dev/null
-
   log "Deploying Postgres Helm release"
-  helm upgrade --install "$POSTGRES_RELEASE" bitnami/postgresql \
+  helm upgrade --install "$PG_RELEASE" "$PG_CHART" \
     --namespace "$NAMESPACE" \
-    --values "$ROOT_DIR/k8s/postgres-values.yaml" \
-    --wait
+    --values "$PG_VALUES" \
+    --create-namespace \
+    --wait \
+    --timeout 10m \
+    --atomic
 
   wait_for_postgres
 

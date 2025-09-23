@@ -48,16 +48,21 @@ make down CLUSTER=kind
 * `make test` – sets up a Python virtualenv, lints (`ruff`/`black`), asserts safe shell printing via `scripts/verify_printf.sh`, and runs all tests. `tests/test_pg_integration.py` spins up a disposable local Postgres to verify transactional behaviour.
 * `make trigger-pg` / `make trigger-dbx` – manual invocations against the Kubernetes service.
 * `make diag` – prints nodes, namespace resources, events, and recent action/Postgres logs.
+* `make reset-pg` – sanitises stale Helm releases/resources in the namespace so the Bitnami chart can be re-installed cleanly.
 * `make ci` – convenience target that runs the kind-based E2E locally.
 
 `scripts/run_e2e.py` performs readiness checks by port-forwarding to the action and asserting the first trigger updates rows while the second updates none. `scripts/diag.sh` is also invoked automatically by CI whenever a failure occurs.
+
+### Helm ownership mismatch auto-fix
+
+If previous runs left Helm-managed resources (for example `NetworkPolicy/postgresql`) annotated for an older release, Helm 3 refuses to adopt them. `make up` invokes `scripts/helm_sanitize_pg.sh` to uninstall the stale release (if present) and delete conflicting resources before reinstalling `tokenize-poc-postgresql`. Run `make reset-pg` manually to perform the cleanup on demand.
 
 ## Implementation highlights
 
 * **Deterministic tokens** – `tok_<base64(value)>_poc` lives in `action/token_logic.py`. Existing tokens are recognised via regex so re-processing is a no-op.
 * **Idempotent Postgres updates** – `action/db_pg.py` executes `SELECT ... FOR UPDATE` in a single transaction and only issues targeted `UPDATE`s when plaintext values exist. Batch size is capped via the trigger `limit`.
 * **Optional Databricks support** – `action/db_dbx.py` parses a Databricks JDBC URL, connects via the SQL connector, and applies the same tokenisation/detection loop. When `DBX_JDBC_URL` is absent, both the smoke test and API return a clear skip message.
-* **Robust orchestration** – `scripts/up.sh` ensures Helm repos are present, waits for `pg_isready`, probes `/healthz` from inside the cluster, and seeds Postgres idempotently. `scripts/down.sh` reverses the process.
+* **Robust orchestration** – `scripts/up.sh` sanitises stray Helm ownership metadata before installing the Bitnami Postgres release, waits for `pg_isready`, probes `/healthz` from inside the cluster, and seeds Postgres idempotently. `scripts/down.sh` uninstalls the release, deletes conflicting resources, and tears the cluster down.
 * **Non-root container** – the Docker image installs dependencies on `python:3.11-slim`, copies the app into `/app`, and switches to UID `10001` before launching `uvicorn`.
 
 ## Troubleshooting
@@ -66,6 +71,7 @@ make down CLUSTER=kind
 * Postgres pods stay Pending – check container runtime resources. `scripts/diag.sh` summarises pod status and events.
 * `make run` hangs – confirm port 18080 is free and that the action pod reached `Ready`. `make logs` tails the deployment.
 * Databricks flow skipped – populate `DBX_JDBC_URL` inside `k8s/secrets.env`. The value is base64-encoded into a Kubernetes secret automatically.
+* Helm refuses to install Postgres due to ownership mismatch – earlier runs may have left resources annotated for a different release. `make up` calls `scripts/helm_sanitize_pg.sh` automatically, or run `make reset-pg` manually to uninstall the stale release and delete conflicting resources before re-deploying.
 * Want to re-run everything fresh – `make down` deletes the namespace and underlying cluster, making reruns idempotent.
 * Saw `printf: '(' invalid format character` in older scripts – the logging utilities now render timestamps with `date` and quote all values before calling `printf`. Running `make test` executes `scripts/verify_printf.sh`, which guards against regressions involving percent signs or parentheses in data.
 
